@@ -8,6 +8,8 @@ from .contracts import (
     LayoutEditResult,
     LayoutWorkspaceView,
     PageView,
+    ProofBatchEditCommand,
+    ProofBatchEditResult,
     ProofEditCommand,
     ProofEditResult,
 )
@@ -36,6 +38,8 @@ __all__ = [
     "OcrPageView",
     "OcrRegionView",
     "OcrWorkspaceView",
+    "ProofBatchEditCommand",
+    "ProofBatchEditResult",
     "ProofEditCommand",
     "ProofEditResult",
     "ProofWorkspaceView",

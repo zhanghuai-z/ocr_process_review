@@ -13,6 +13,8 @@ from app.application import (
     LayoutEditCommand,
     LayoutEditResult,
     PageView,
+    ProofBatchEditCommand,
+    ProofBatchEditResult,
     ProofEditCommand,
     ProofEditResult,
     WorkbenchApplication,
@@ -383,7 +385,10 @@ class WorkflowController(QObject):
         self._emit_session_state()
         return result
 
-    def apply_proof_edit(self, command: ProofEditCommand) -> ProofEditResult:
+    def apply_proof_edit(
+        self,
+        command: ProofEditCommand | ProofBatchEditCommand,
+    ) -> ProofEditResult | ProofBatchEditResult:
         """Commit one proof intent and publish the resulting immutable view."""
 
         result = self._application.apply_proof_edit(command)

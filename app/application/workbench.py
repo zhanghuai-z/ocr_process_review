@@ -9,6 +9,8 @@ from app.application.contracts import (
     LayoutEditResult,
     LayoutWorkspaceView,
     PageView,
+    ProofBatchEditCommand,
+    ProofBatchEditResult,
     ProofEditCommand,
     ProofEditResult,
 )
@@ -223,9 +225,40 @@ class WorkbenchApplication:
             reason=domain_result.ocr_invalidation.reason,
         )
 
-    def apply_proof_edit(self, command: ProofEditCommand) -> ProofEditResult:
+    def apply_proof_edit(
+        self,
+        command: ProofEditCommand | ProofBatchEditCommand,
+    ) -> ProofEditResult | ProofBatchEditResult:
+        if isinstance(command, ProofBatchEditCommand):
+            service = self._require_proof_service()
+            session_results = service.replace_text_units_across_states(
+                tuple(
+                    (
+                        item.proof_uid,
+                        item.replacements,
+                        item.expected_revision,
+                        item.expected_fingerprint,
+                        item.status,
+                    )
+                    for item in command.commands
+                )
+            )
+            results = tuple(
+                ProofEditResult(
+                    command=item,
+                    changed=result.changed,
+                    proof_uid=result.state.uid,
+                    revision=result.state.revision,
+                    fingerprint=result.state.fingerprint,
+                    changed_text_unit_uids=result.changed_text_unit_uids,
+                )
+                for item, result in zip(command.commands, session_results, strict=True)
+            )
+            if any(result.changed for result in results):
+                self._dirty = True
+            return ProofBatchEditResult(command=command, results=results)
         if not isinstance(command, ProofEditCommand):
-            raise TypeError("proof edit requires ProofEditCommand")
+            raise TypeError("proof edit requires a proof edit command")
         service = self._require_proof_service()
         common = {
             "expected_revision": command.expected_revision,

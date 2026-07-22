@@ -99,16 +99,8 @@ class OcrAtomBox:
 
         if not isinstance(atom_view, OcrAtomView):
             raise TypeError("from_atom_view requires OcrAtomView")
-        raw = atom_view.bbox
-        if isinstance(raw, BBox):
-            geom = raw
-        else:
-            geom = BBox(
-                int(raw[0]),
-                int(raw[1]),
-                int(raw[2]) - int(raw[0]),
-                int(raw[3]) - int(raw[1]),
-            )
+        left, top, right, bottom = atom_view.bbox
+        geom = BBox(left, top, right - left, bottom - top)
         return cls(
             uid=atom_view.atom_uid,
             bbox=geom,

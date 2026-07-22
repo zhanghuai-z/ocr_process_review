@@ -515,15 +515,10 @@ def _line_view(
     else:
         confidence = None
     bbox: BBox | None
-    line_boxes = [item.bbox for item in mapped_lines if item.bbox is not None]
-    if line_boxes:
-        # 映射多条 OCR 行时取并集（公式/表格行常见），而不是丢弃几何
-        bbox = _bbox_union(line_boxes)
-    else:
-        # region_uids 与 mapped_lines 同源，region 兜底不可达；
-        # 字符索引 entry 的 bbox 是唯一可达的备用几何真值
-        entry_boxes = [item.bbox for item in entries if item.bbox is not None]
-        bbox = _bbox_union(entry_boxes) if entry_boxes else None
+    line_boxes = [item.bbox for item in mapped_lines]
+    # 映射多条 OCR 行时取并集（公式/表格行常见）。无行映射时
+    # 几何明确不可用，不从字符索引或版面投影反推新的事实。
+    bbox = _bbox_union(line_boxes) if line_boxes else None
     return ProofLineView(
         proof_uid=state.uid,
         batch_uid=batch.uid,

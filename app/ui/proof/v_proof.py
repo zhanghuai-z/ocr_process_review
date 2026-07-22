@@ -13,9 +13,7 @@ Interaction model restored from the mature vertical proof view (d4c6dfe):
 - an :class:`ImageViewer` original-image pane that highlights the selected
   character box and its line, and reverse-locates the text context when the
   user clicks inside a line box;
-- conservative multi-select batch edits: only occurrences on the currently
-  displayed page are replaced, cross-page occurrences are skipped and the
-  skip count is reported in the status bar;
+- book-wide multi-select edits are emitted as one atomic application command;
 - selection survives workspace snapshot replacements: occurrences are
   re-located by their stable occurrence keys.
 """
@@ -54,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.application.contracts import ProofEditCommand
+from app.application.contracts import ProofBatchEditCommand, ProofEditCommand
 from app.application.proof_candidates import has_confusable_entry, ranked_candidates
 from app.application.proof_workspace import (
     ProofLineView,
@@ -890,7 +888,7 @@ class VProofPanel(QWidget):
 
     # ─────────────────── edit commands ───────────────────
 
-    def _emit(self, command: ProofEditCommand) -> None:
+    def _emit(self, command: ProofEditCommand | ProofBatchEditCommand) -> None:
         self.proof_edit_requested.emit(command)
 
     def _apply_replacement_to_selected(self, text: str) -> int:
@@ -905,11 +903,16 @@ class VProofPanel(QWidget):
                 continue
             changes = grouped[entry.proof_uid].setdefault(key, {})
             changes[entry.char_index] = text
+        commands: list[ProofEditCommand] = []
         emitted = 0
         for proof_uid, unit_changes in grouped.items():
             state = self._states[proof_uid]
             replacements: list[tuple[str, str]] = []
-            for key, changes in sorted(unit_changes.items(), key=lambda item: (self._units[item[0]].order, item[0][1])):
+            ordered_changes = sorted(
+                unit_changes.items(),
+                key=lambda item: (self._units[item[0]].order, item[0][1]),
+            )
+            for key, changes in ordered_changes:
                 unit = self._units[key]
                 chars = list(unit.text)
                 for char_index, replacement in changes.items():
@@ -919,7 +922,7 @@ class VProofPanel(QWidget):
                     replacements.append((unit.text_unit_uid, updated))
             if not replacements:
                 continue
-            self._emit(
+            commands.append(
                 ProofEditCommand(
                     proof_uid=proof_uid,
                     op="replace_many",
@@ -929,12 +932,16 @@ class VProofPanel(QWidget):
                 )
             )
             emitted += len(replacements)
+        if len(commands) == 1:
+            self._emit(commands[0])
+        elif commands:
+            self._emit(ProofBatchEditCommand(commands=tuple(commands)))
         return emitted
 
     def _gallery_direct_overwrite(self, text: str) -> bool:
         applied = self._apply_replacement_to_selected(text)
         if applied:
-            self._set_status_message(f'✓ 直输替换为 "{text}"（{applied} 处）', "ok")
+            self._set_status_message(f'已提交直输替换为 "{text}"（{applied} 处）', "ok")
             return True
         return False
 
@@ -943,7 +950,7 @@ class VProofPanel(QWidget):
         # single space blanks the slot while keeping the text length locked.
         applied = self._apply_replacement_to_selected(" ")
         if applied:
-            self._set_status_message(f"✓ 已清空为空白（{applied} 处）", "ok")
+            self._set_status_message(f"已提交清空为空白（{applied} 处）", "ok")
             return True
         return False
 
@@ -1073,9 +1080,9 @@ class VProofPanel(QWidget):
     def _apply_candidate(self, candidate: str) -> None:
         applied = self._apply_replacement_to_selected(candidate)
         if applied == 0:
-            self._set_status_message("当前页没有可替换的目标", "error")
+            self._set_status_message("当前选区没有可替换的目标", "error")
             return
-        message = f"✓ 已批量应用候选到 {applied} 处" if applied > 1 else "✓ 已应用候选"
+        message = f"已提交批量候选替换（{applied} 处）" if applied > 1 else "已提交候选替换"
         self._set_status_message(message, "ok")
 
     # ─────────────────── rendering ───────────────────

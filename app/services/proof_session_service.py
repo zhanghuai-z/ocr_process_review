@@ -240,6 +240,109 @@ class ProofSessionService:
             changed_text_unit_uids=tuple(changed),
         )
 
+    def replace_text_units_across_states(
+        self,
+        requests: Iterable[
+            tuple[
+                str,
+                tuple[tuple[str, str], ...],
+                int,
+                str,
+                str | None,
+            ]
+        ],
+    ) -> tuple[ProofSessionResult, ...]:
+        """Atomically replace text units across several proof states."""
+
+        values = tuple(requests)
+        proof_uids = tuple(item[0] for item in values)
+        if not values:
+            raise ValueError("cross-state proof batch must not be empty")
+        if len(set(proof_uids)) != len(proof_uids):
+            raise ValueError("cross-state proof batch contains duplicate proof UIDs")
+
+        prepared: list[
+            tuple[ProofState, ProofState, tuple[str, ...], ProofOperation]
+        ] = []
+        for proof_uid, replacements, revision, fingerprint, status in values:
+            current = self._cas_state(proof_uid, revision, fingerprint)
+            replacement_map = dict(replacements)
+            if len(replacement_map) != len(replacements):
+                raise ValueError("replacement batch contains duplicate text unit UIDs")
+            if any(not isinstance(text, str) for text in replacement_map.values()):
+                raise TypeError("replacement texts must be str")
+            units_by_uid = {unit.uid: unit for unit in current.text_units}
+            unknown = set(replacement_map) - set(units_by_uid)
+            if unknown:
+                raise ProofTargetError(
+                    f"unknown text unit UID(s): {sorted(unknown)!r}"
+                )
+            next_status = None if status is None else _status_value(status)
+            changed_uids: list[str] = []
+            next_units: list[ProofTextUnit] = []
+            for unit in current.text_units:
+                if unit.uid not in replacement_map:
+                    next_units.append(unit)
+                    continue
+                unit_status = unit.status if next_status is None else next_status
+                text = replacement_map[unit.uid]
+                if text == unit.text and unit_status == unit.status:
+                    next_units.append(unit)
+                    continue
+                changed_uids.append(unit.uid)
+                next_units.append(
+                    replace(
+                        unit,
+                        text=text,
+                        status=unit_status,
+                        revision=unit.revision + 1,
+                    )
+                )
+            candidate = replace(
+                current,
+                text_units=tuple(next_units),
+                revision=current.revision,
+            )
+            prepared.append(
+                (current, candidate, tuple(changed_uids), ProofOperation.BATCH_TEXT)
+            )
+
+        changed_prepared = tuple(item for item in prepared if item[2])
+        stored_by_uid: dict[str, ProofState] = {}
+        if changed_prepared:
+            stored = self._session.proof_repository.replace_states(
+                tuple(
+                    (candidate, current.revision, current.fingerprint)
+                    for current, candidate, _changed_uids, _operation in changed_prepared
+                )
+            )
+            stored_by_uid = {state.uid: state for state in stored}
+
+        results: list[ProofSessionResult] = []
+        for current, _candidate, changed_uids, operation in prepared:
+            if not changed_uids:
+                results.append(
+                    self._result(
+                        operation,
+                        ProofOutcome.NOOP,
+                        current,
+                        changed=False,
+                    )
+                )
+                continue
+            stored = stored_by_uid[current.uid]
+            self._record_history(current, stored, operation)
+            results.append(
+                self._result(
+                    operation,
+                    ProofOutcome.APPLIED,
+                    stored,
+                    changed=True,
+                    changed_text_unit_uids=changed_uids,
+                )
+            )
+        return tuple(results)
+
     def replace_spans(
         self,
         proof_uid: str,

@@ -219,6 +219,67 @@ def _session() -> tuple[ProjectSession, ProofState]:
     return session, state
 
 
+def test_cross_state_text_batch_is_atomic_when_later_cas_fails() -> None:
+    session, state = _session()
+    service = ProofSessionService(session)
+    first = service.create_state(state).state
+    second_unit = replace(state.text_units[0], uid="unit-3", text="de")
+    second_state = replace(
+        state,
+        uid="proof-2",
+        anchor_snapshot=replace(state.anchor_snapshot, uid="anchor-2"),
+        text_units=(second_unit,),
+        alignment_segments=(),
+        alignment_slices=(),
+    )
+    second = service.create_state(second_state).state
+
+    with pytest.raises(RevisionConflictError):
+        service.replace_text_units_across_states(
+            (
+                (
+                    first.uid,
+                    (("unit-1", "xc"),),
+                    first.revision,
+                    first.fingerprint,
+                    "modified",
+                ),
+                (
+                    second.uid,
+                    (("unit-3", "ye"),),
+                    second.revision + 1,
+                    second.fingerprint,
+                    "modified",
+                ),
+            )
+        )
+
+    assert service.get_state(first.uid).text_units[0].text == "ac"
+    assert service.get_state(second.uid).text_units[0].text == "de"
+
+    results = service.replace_text_units_across_states(
+        (
+            (
+                first.uid,
+                (("unit-1", "xc"),),
+                first.revision,
+                first.fingerprint,
+                "modified",
+            ),
+            (
+                second.uid,
+                (("unit-3", "ye"),),
+                second.revision,
+                second.fingerprint,
+                "modified",
+            ),
+        )
+    )
+    assert all(result.changed for result in results)
+    assert service.get_state(first.uid).text_units[0].text == "xc"
+    assert service.get_state(second.uid).text_units[0].text == "ye"
+
+
 def test_proof_scope_has_one_write_service_and_no_retired_entry_points() -> None:
     assert (ROOT / "app/services/proof_session_service.py").exists()
     for retired in (

@@ -19,7 +19,7 @@ class OcrAtomView:
     bbox: BBox
     confidence: float
     index: int
-    source: str = ""
+    source: str
 
 
 @dataclass(frozen=True, slots=True)

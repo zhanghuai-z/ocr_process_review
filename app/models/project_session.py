@@ -538,6 +538,40 @@ class _RevisionedStore:
         self._records[uid] = updated
         return updated
 
+    def replace_many(
+        self,
+        replacements: tuple[tuple[object, int, str | None], ...],
+    ) -> tuple[object, ...]:
+        """Replace several records atomically after validating the full batch."""
+
+        values = tuple(replacements)
+        uids = tuple(cast(str, getattr(record, "uid", "")) for record, _revision, _fingerprint in values)
+        if len(set(uids)) != len(uids):
+            raise DuplicateUidError("replacement batch contains duplicate UIDs")
+        staged = dict(self._records)
+        updated_records: list[object] = []
+        for record, expected_revision, expected_fingerprint in values:
+            self._validate(record)
+            uid = cast(str, getattr(record, "uid"))
+            try:
+                current = staged[uid]
+            except KeyError as exc:
+                raise RecordNotFoundError(f"record UID is not present: {uid!r}") from exc
+            _check_snapshot(
+                current,
+                revision=expected_revision,
+                fingerprint=expected_fingerprint,
+            )
+            if getattr(record, "revision") != expected_revision:
+                raise RevisionConflictError(
+                    "replacement record revision does not match expected_revision"
+                )
+            updated = dc_replace(record, revision=getattr(current, "revision") + 1)
+            staged[uid] = updated
+            updated_records.append(updated)
+        self._records = staged
+        return tuple(updated_records)
+
     def all(self) -> tuple[object, ...]:
         return tuple(self._records[uid] for uid in sorted(self._records))
 
@@ -1076,6 +1110,20 @@ class ProofRepository:
                 expected_revision=expected_revision,
                 expected_fingerprint=expected_fingerprint,
             ),
+        )
+
+    def replace_states(
+        self,
+        replacements: tuple[tuple[ProofState, int, str], ...],
+    ) -> tuple[ProofState, ...]:
+        """Replace one proof batch atomically across multiple states."""
+
+        values = tuple(replacements)
+        for record, _revision, _fingerprint in values:
+            self._validate_state(record)
+        return tuple(
+            cast(ProofState, record)
+            for record in self._states.replace_many(values)
         )
 
     def mark_rebind_required(

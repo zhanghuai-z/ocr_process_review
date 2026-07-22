@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 from app.application.proof_workspace import build_proof_workspace_view
-from app.application.contracts import ProofEditCommand
+from app.application.contracts import ProofBatchEditCommand, ProofEditCommand
 from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.ocr_records import (
@@ -547,6 +548,55 @@ def test_vproof_index_edit_uses_stable_entry_ids_and_emits_command(
     assert selected_key[0:2] == ("proof-1", "unit-1")
     assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
     assert session.ocr_observation_repository.get_atom("atom-1").text == "a"
+    panel.close()
+
+
+def test_vproof_cross_state_selection_emits_one_atomic_batch_command(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.v_proof import VProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = VProofPanel(build_proof_workspace_view(session))
+    first_entry = panel._selected_entry
+    assert first_entry is not None
+    first_state = panel._states[first_entry.proof_uid]
+    first_unit = panel._units[(first_entry.proof_uid, first_entry.text_unit_uid)]
+    second_unit = replace(
+        first_unit,
+        proof_uid="proof-2",
+        text_unit_uid="unit-2",
+        text=first_unit.text,
+    )
+    second_state = replace(
+        first_state,
+        proof_uid="proof-2",
+        text_units=(second_unit,),
+        lines=(),
+    )
+    second_entry = replace(
+        first_entry,
+        proof_uid="proof-2",
+        text_unit_uid="unit-2",
+    )
+    panel._states[second_state.proof_uid] = second_state
+    panel._units[(second_state.proof_uid, second_unit.text_unit_uid)] = second_unit
+    second_item = QListWidgetItem("")
+    second_item.setData(Qt.ItemDataRole.UserRole, second_entry)
+    panel._gallery.addItem(second_item)
+    panel._gallery.item(0).setSelected(True)
+    second_item.setSelected(True)
+
+    commands: list[object] = []
+    panel.proof_edit_requested.connect(commands.append)
+    assert panel._apply_replacement_to_selected("x") == 2
+    assert len(commands) == 1
+    assert isinstance(commands[0], ProofBatchEditCommand)
+    assert tuple(item.proof_uid for item in commands[0].commands) == (
+        "proof-1",
+        "proof-2",
+    )
     panel.close()
 
 

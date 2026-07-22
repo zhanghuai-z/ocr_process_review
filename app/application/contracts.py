@@ -545,6 +545,25 @@ class ProofEditCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ProofBatchEditCommand:
+    """One atomic application intent spanning several proof states."""
+
+    commands: tuple[ProofEditCommand, ...]
+
+    def __post_init__(self) -> None:
+        values = tuple(self.commands)
+        if not values:
+            raise ValueError("proof batch edit requires at least one command")
+        if any(not isinstance(command, ProofEditCommand) for command in values):
+            raise TypeError("proof batch edit requires ProofEditCommand values")
+        if any(command.op != "replace_many" for command in values):
+            raise ValueError("proof batch edit supports replace_many commands only")
+        if len({command.proof_uid for command in values}) != len(values):
+            raise ValueError("proof batch edit contains duplicate proof UIDs")
+        object.__setattr__(self, "commands", values)
+
+
+@dataclass(frozen=True, slots=True)
 class ProofEditResult:
     command: ProofEditCommand
     changed: bool
@@ -566,12 +585,34 @@ class ProofEditResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ProofBatchEditResult:
+    command: ProofBatchEditCommand
+    results: tuple[ProofEditResult, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command, ProofBatchEditCommand):
+            raise TypeError("command must be ProofBatchEditCommand")
+        values = tuple(self.results)
+        if len(values) != len(self.command.commands):
+            raise ValueError("proof batch result count must match command count")
+        if any(not isinstance(result, ProofEditResult) for result in values):
+            raise TypeError("results must contain ProofEditResult values")
+        object.__setattr__(self, "results", values)
+
+    @property
+    def changed(self) -> bool:
+        return any(result.changed for result in self.results)
+
+
 __all__ = [
     "BlockView",
     "LayoutEditCommand",
     "LayoutEditResult",
     "LayoutWorkspaceView",
     "PageView",
+    "ProofBatchEditCommand",
+    "ProofBatchEditResult",
     "ProofEditCommand",
     "ProofEditResult",
 ]
