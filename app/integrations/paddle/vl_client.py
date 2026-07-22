@@ -29,6 +29,10 @@ class PaddleVLRequestCancelled(PaddleVLClientError):
     """The caller cancelled an in-flight vendor request."""
 
 
+class PaddleVLQueueFullError(PaddleVLClientError):
+    """The remote service rejected a submission because its queue is full."""
+
+
 def _has_env_proxy() -> bool:
     return any(
         os.environ.get(key)
@@ -95,6 +99,7 @@ class PaddleVLClient:
     poll_timeout: float = 600.0
     poll_interval_s: float = 5.0
     network_mode: str = "direct"
+    queue_retry_delays_s: tuple[float, ...] = (5.0, 15.0, 30.0)
     sleep: Any = field(default=time.sleep, repr=False)
     cancel_callback: Any = field(default=None, repr=False)
 
@@ -147,10 +152,24 @@ class PaddleVLClient:
         raise RuntimeError(f"Paddle VL request was not attempted: {method} {url}")
 
     @staticmethod
-    def _raise_http(response: requests.Response, operation: str) -> None:
+    def _response_error_code(response: requests.Response) -> object:
+        try:
+            body = response.json()
+        except (requests.RequestException, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+        return body.get("code", body.get("errorCode"))
+
+    @classmethod
+    def _raise_http(cls, response: requests.Response, operation: str) -> None:
         if response.status_code >= 400:
             body = response.text[:1000]
             detail = f": {body}" if body else ""
+            if operation == "submit" and cls._response_error_code(response) in (10010, "10010"):
+                raise PaddleVLQueueFullError(
+                    f"Paddle VL submit queue is full (10010){detail}"
+                )
             raise PaddleVLClientError(
                 f"Paddle VL {operation} failed: HTTP {response.status_code}{detail}"
             )
@@ -182,20 +201,7 @@ class PaddleVLClient:
         }
         if source_run_id:
             data["batchId"] = source_run_id
-        file_obj = _NamedBytes(image_bytes, filename)
-        try:
-            response = self._request(
-                "POST",
-                self.jobs_url,
-                data=data,
-                files={"file": (filename, file_obj, "application/octet-stream")},
-                headers=self._headers(),
-                timeout=self.request_timeout,
-            )
-            self._raise_http(response, "submit")
-            body = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            raise PaddleVLClientError("Paddle VL submit response is invalid") from exc
+        body = self._submit_with_queue_retry(image_bytes, filename=filename, data=data)
         job_id = self._job_id(body)
         json_url, job_data = self._wait_for_result(job_id)
         self._raise_if_cancelled()
@@ -211,6 +217,36 @@ class PaddleVLClient:
         except requests.RequestException as exc:
             raise PaddleVLClientError("Paddle VL result download failed") from exc
         return _success_envelope(jsonl_text, job_id=job_id, job_data=job_data)
+
+    def _submit_with_queue_retry(
+        self,
+        image_bytes: bytes,
+        *,
+        filename: str,
+        data: dict[str, str],
+    ) -> object:
+        delays = tuple(max(0.0, float(value)) for value in self.queue_retry_delays_s)
+        for attempt in range(len(delays) + 1):
+            self._raise_if_cancelled()
+            file_obj = _NamedBytes(image_bytes, filename)
+            try:
+                response = self._request(
+                    "POST",
+                    self.jobs_url,
+                    data=data,
+                    files={"file": (filename, file_obj, "application/octet-stream")},
+                    headers=self._headers(),
+                    timeout=self.request_timeout,
+                )
+                self._raise_http(response, "submit")
+                return response.json()
+            except PaddleVLQueueFullError:
+                if attempt >= len(delays):
+                    raise
+                self.sleep(delays[attempt])
+            except (requests.RequestException, ValueError) as exc:
+                raise PaddleVLClientError("Paddle VL submit response is invalid") from exc
+        raise AssertionError("Paddle VL queue retry loop terminated unexpectedly")
 
     @staticmethod
     def _job_id(body: object) -> str:
@@ -282,5 +318,6 @@ __all__ = [
     "PADDLE_VL_NETWORK_MODES",
     "PaddleVLClient",
     "PaddleVLClientError",
+    "PaddleVLQueueFullError",
     "PaddleVLRequestCancelled",
 ]
