@@ -128,10 +128,10 @@ FAR_LINE_PAIR_MIN_H = 48
 FAR_LINE_PAIR_MAX_H = 54
 FOCUS_OPACITY = {"active": 1.0, "near": 0.45, "far": 0.30}
 
-FORMULA_SCALE = 1.40
+FORMULA_SCALE = 2.00
 FORMULA_IMAGE_ROW_H = round(IMAGE_ROW_H * FORMULA_SCALE)
-FORMULA_RENDER_TARGET_H = 56
-FORMULA_RENDER_AREA_H = 72
+FORMULA_RENDER_TARGET_H = round(40 * FORMULA_SCALE)
+FORMULA_RENDER_AREA_H = FORMULA_RENDER_TARGET_H + 8
 FORMULA_SOURCE_PANEL_H = 82
 FORMULA_VISUAL_HEIGHT_RATIO = 0.98
 FORMULA_SOURCE_POPUP_OFFSET = QPoint(10, 18)
@@ -1451,6 +1451,7 @@ class _FormulaSourcePopup(QFrame):
 
     source_changed = Signal(str)
     closed = Signal()
+    command_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1495,14 +1496,39 @@ class _FormulaSourcePopup(QFrame):
         self._emit_timer.start()
 
     def _emit_source_changed(self) -> None:
+        if self._emit_timer.isActive():
+            self._emit_timer.stop()
         self.source_changed.emit(self.source_text())
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
         if watched is self._source_edit and event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            modifiers = event.modifiers()
+            ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+            shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
             if key == Qt.Key.Key_Escape or (ctrl and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}):
                 self.hide()
+                return True
+            command = ""
+            if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab and shift):
+                command = "previous"
+            elif key == Qt.Key.Key_Tab:
+                command = "next"
+            elif ctrl and key == Qt.Key.Key_Up:
+                command = "previous"
+            elif ctrl and key == Qt.Key.Key_Down:
+                command = "next"
+            elif ctrl and key == Qt.Key.Key_S:
+                command = "save"
+            elif key == Qt.Key.Key_F5:
+                command = "flag"
+            elif key == Qt.Key.Key_F6:
+                command = "skip"
+            if command:
+                self._emit_source_changed()
+                if command != "save":
+                    self.hide()
+                self.command_requested.emit(command)
                 return True
         return super().eventFilter(watched, event)
 
@@ -1519,6 +1545,7 @@ class _FormulaSourceInlinePanel(QFrame):
 
     source_changed = Signal(str)
     closed = Signal()
+    command_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1556,6 +1583,8 @@ class _FormulaSourceInlinePanel(QFrame):
         self._source_edit.setTextCursor(cursor)
 
     def _emit_source_changed(self) -> None:
+        if self._emit_timer.isActive():
+            self._emit_timer.stop()
         self.source_changed.emit(
             self._source_edit.toPlainText().replace("\r", "").replace("\n", " ").strip()
         )
@@ -1563,9 +1592,32 @@ class _FormulaSourceInlinePanel(QFrame):
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
         if watched is self._source_edit and event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            modifiers = event.modifiers()
+            ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+            shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
             if key == Qt.Key.Key_Escape or (ctrl and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}):
                 self.hide()
+                return True
+            command = ""
+            if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab and shift):
+                command = "previous"
+            elif key == Qt.Key.Key_Tab:
+                command = "next"
+            elif ctrl and key == Qt.Key.Key_Up:
+                command = "previous"
+            elif ctrl and key == Qt.Key.Key_Down:
+                command = "next"
+            elif ctrl and key == Qt.Key.Key_S:
+                command = "save"
+            elif key == Qt.Key.Key_F5:
+                command = "flag"
+            elif key == Qt.Key.Key_F6:
+                command = "skip"
+            if command:
+                self._emit_source_changed()
+                if command != "save":
+                    self.hide()
+                self.command_requested.emit(command)
                 return True
         return super().eventFilter(watched, event)
 
@@ -1785,7 +1837,7 @@ class _ProofRowWidget(QFrame):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._formula_render_area.setWidget(self._formula_render_label)
-        self._formula_render_area.setVisible(row.kind == "formula")
+        self._formula_render_area.setVisible(False)
         content_layout.addWidget(self._formula_render_area)
 
         self._active = False
@@ -2012,6 +2064,7 @@ class _ProofRowWidget(QFrame):
         active = depth == "active"
         self.set_active(active)
         self.editor.setVisible(active and self.row.kind != "formula")
+        self._formula_render_area.setVisible(active and self.row.kind == "formula")
         if not active and self._formula_source_panel is not None:
             self._formula_source_panel.hide()
         self._image.setFixedHeight(
@@ -2026,7 +2079,7 @@ class _ProofRowWidget(QFrame):
         extra = (
             FORMULA_RENDER_AREA_H - TEXT_EDITOR_DEFAULT_H
             + FORMULA_IMAGE_ROW_H - IMAGE_ROW_H
-            if self.row.kind == "formula" and not self._large_image
+            if active and self.row.kind == "formula" and not self._large_image
             else 0
         )
         if self._formula_source_panel is not None and self._formula_source_panel.isVisible():
@@ -2064,7 +2117,7 @@ class _ProofRowWidget(QFrame):
         if self.row.kind != "formula":
             self._formula_render_area.setVisible(False)
             return
-        self._formula_render_area.setVisible(True)
+        self._formula_render_area.setVisible(self._focus_depth == "active")
         visual = _render_formula_visual(
             _formula_preview_source(
                 self.editor.toPlainText(),
@@ -2155,6 +2208,9 @@ class _ProofRowWidget(QFrame):
                 self._formula_source_panel.closed.connect(
                     self._on_formula_source_panel_closed
                 )
+                self._formula_source_panel.command_requested.connect(
+                    self._handle_formula_source_command
+                )
                 self._content_layout.addWidget(self._formula_source_panel)
             self._formula_source_panel.open_for(text)
             self.set_focus_depth("active")
@@ -2163,7 +2219,24 @@ class _ProofRowWidget(QFrame):
             self._formula_popup = _FormulaSourcePopup(self)
             self._formula_popup.source_changed.connect(self._apply_formula_source_text)
             self._formula_popup.closed.connect(self._on_formula_popup_closed)
+            self._formula_popup.command_requested.connect(
+                self._handle_formula_source_command
+            )
         self._formula_popup.open_for(text[start:end], global_pos, editable=True)
+
+    def _handle_formula_source_command(self, command: str) -> None:
+        if command == "previous":
+            self.navigate_requested.emit(-1)
+        elif command == "next":
+            self.navigate_requested.emit(1)
+        elif command == "save":
+            self.save_all_requested.emit()
+        elif command == "flag":
+            self.flag_requested.emit()
+        elif command == "skip":
+            self.skip_requested.emit()
+        else:
+            raise ValueError(f"unsupported formula source command: {command!r}")
 
     def _open_standalone_formula_editor(self, global_pos: QPoint) -> None:
         if self.row.kind != "formula":
