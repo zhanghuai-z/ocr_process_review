@@ -698,8 +698,10 @@ class VProofPanel(QWidget):
             item = QListWidgetItem("")
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setData(_ICON_PENDING_ROLE, True)
+            geometry_note = "" if entry.available else " · 无精确字符框"
             item.setToolTip(
-                f"第 {entry.page_number} 页 · {entry.proof_uid}/{entry.text_unit_uid} · 位 #{entry.char_index + 1}"
+                f"第 {entry.page_number} 页 · {entry.proof_uid}/{entry.text_unit_uid}"
+                f" · 位 #{entry.char_index + 1}{geometry_note}"
             )
             self._gallery.addItem(item)
         if self._gallery.count():
@@ -771,7 +773,7 @@ class VProofPanel(QWidget):
 
     def _entry_icon(self, entry: ProofCharView) -> QIcon:
         page = self._pages.get(entry.page_uid)
-        if page is None:
+        if page is None or entry.bbox is None:
             return QIcon()
         # 2x source density: Qt only ever down-scales the thumbnail.
         cell = GALLERY_CELL * 2
@@ -784,19 +786,10 @@ class VProofPanel(QWidget):
             QSize(cell - 16, cell - 16),
             pad=_gallery_crop_pad(entry),
         )
-        if not crop.isNull():
-            painter.drawPixmap((cell - crop.width()) // 2, (cell - crop.height()) // 2, crop)
-        else:
-            pen_color = QColor("#5C6B58")
-            painter.setPen(pen_color)
-            font = painter.font()
-            font.setPointSize(18)
-            painter.setFont(font)
-            painter.drawText(
-                canvas.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                (entry.text or "?")[:4],
-            )
+        if crop.isNull():
+            painter.end()
+            return QIcon()
+        painter.drawPixmap((cell - crop.width()) // 2, (cell - crop.height()) // 2, crop)
         # 旧版心智：相同字索引就是普通的字符切图，不画边框/置信度标记
         painter.end()
         return QIcon(canvas)

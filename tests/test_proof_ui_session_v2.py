@@ -482,6 +482,66 @@ def test_char_views_use_explicit_char_span_without_sequential_guessing(qapp, tmp
     assert entries[1].bbox == (30, 10, 50, 30)
 
 
+def test_char_views_do_not_reuse_one_word_bbox_as_multiple_character_crops(
+    qapp,
+    tmp_path,
+) -> None:
+    """A word carrier owns text, but cannot provide exact per-char geometry."""
+
+    from app.ui.proof.confidence_view import build_char_views
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    line = workspace.proof_states[0].lines[0]
+    word_atom = replace(
+        line.atoms[0],
+        text="ab",
+        token_text="ab",
+        granularity="word",
+        char_span=(0, 2),
+        geometry_available=True,
+    )
+    entries = build_char_views(
+        replace(line, atoms=(word_atom,)),
+        workspace.pages[0],
+    )
+
+    assert [entry.text for entry in entries] == ["a", "b"]
+    assert [entry.ocr_char for entry in entries] == ["a", "b"]
+    assert all(entry.atom_uid == word_atom.atom_uid for entry in entries)
+    assert all(entry.bbox is None for entry in entries)
+    assert all(entry.available is False for entry in entries)
+
+
+def test_vproof_word_carrier_does_not_render_a_fake_character_crop(
+    qapp,
+    tmp_path,
+) -> None:
+    from app.ui.proof.confidence_view import build_char_views
+    from app.ui.proof.v_proof import VProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    line = workspace.proof_states[0].lines[0]
+    word_atom = replace(
+        line.atoms[0],
+        text="ab",
+        token_text="ab",
+        granularity="word",
+        char_span=(0, 2),
+        geometry_available=True,
+    )
+    entry = build_char_views(
+        replace(line, atoms=(word_atom,)),
+        workspace.pages[0],
+    )[0]
+    panel = VProofPanel(workspace)
+
+    assert entry.bbox is None
+    assert panel._entry_icon(entry).isNull()
+    panel.close()
+
+
 def test_hproof_does_not_invent_atom_mapping_without_explicit_span(
     qapp: QApplication,
     tmp_path: Path,

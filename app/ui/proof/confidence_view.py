@@ -62,9 +62,10 @@ def build_char_views(
 
     The explicit ``atom.char_span`` carried by the immutable view is the
     only character-to-atom relation used here.  Atoms without a span claim
-    no characters; characters without a span stay visible but are marked
-    unavailable.  Sequential guessing by atom text length is deliberately
-    not a fallback: one missing span would misalign every later character.
+    no characters.  A multi-character carrier may establish text ownership,
+    but its shared bbox is not single-character geometry and therefore is not
+    exposed as a character crop.  Sequential guessing or splitting a word
+    bbox is deliberately not a fallback: either would invent geometry.
     """
 
     if line.page_uid != page.page_uid:
@@ -91,6 +92,11 @@ def build_char_views(
     for char_index, text_char in enumerate(line.proof_text):
         mapped = by_char_index.get(char_index)
         atom, offset = mapped if mapped is not None else (None, -1)
+        exact_geometry = (
+            atom is not None
+            and atom.char_span is not None
+            and atom.char_span[1] - atom.char_span[0] == 1
+        )
         ocr_char = (
             atom.text[offset]
             if atom is not None and 0 <= offset < len(atom.text)
@@ -109,10 +115,10 @@ def build_char_views(
                 region_uid=atom.region_uid if atom is not None else line.region_uid,
                 atom_uid=atom.atom_uid if atom is not None else None,
                 atom_index=atom.atom_index if atom is not None else None,
-                bbox=atom.bbox if atom is not None else None,
+                bbox=atom.bbox if exact_geometry else None,
                 confidence=normalize_confidence(atom.confidence) if atom is not None else None,
                 ocr_char=ocr_char,
-                available=atom is not None,
+                available=exact_geometry,
             )
         )
 
