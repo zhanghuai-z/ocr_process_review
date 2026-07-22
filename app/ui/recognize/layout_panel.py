@@ -1583,7 +1583,18 @@ class LayoutPanel(QWidget):
                 for region in page.regions:
                     for line in region.lines:
                         for atom in line.atoms:
-                            if atom.bbox.w <= 0 or atom.bbox.h <= 0:
+                            raw_bbox = atom.bbox
+                            if isinstance(raw_bbox, BBox):
+                                geom = raw_bbox
+                            else:
+                                # OCR workspace 的 bbox 是 XYXY 元组，转成几何 BBox
+                                geom = BBox(
+                                    int(raw_bbox[0]),
+                                    int(raw_bbox[1]),
+                                    int(raw_bbox[2]) - int(raw_bbox[0]),
+                                    int(raw_bbox[3]) - int(raw_bbox[1]),
+                                )
+                            if geom.w <= 0 or geom.h <= 0:
                                 # 退化几何的 atom 无法入画（真实数据存在），跳过
                                 continue
                             confidence = float(atom.confidence)
@@ -1593,7 +1604,7 @@ class LayoutPanel(QWidget):
                             page_boxes.append(
                                 OcrAtomBox(
                                     uid=atom.atom_uid,
-                                    bbox=atom.bbox,
+                                    bbox=geom,
                                     text=atom.text,
                                     confidence=confidence,
                                     line_uid=line.line_uid,
