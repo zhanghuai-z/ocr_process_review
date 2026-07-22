@@ -461,6 +461,26 @@ def test_hproof_page_directory_uses_proof_page_thumbnail_cards(
     panel.close()
 
 
+def test_char_views_use_explicit_char_span_without_sequential_guessing(qapp, tmp_path) -> None:
+    """Review regression: a missing span must not shift later char mappings."""
+
+    from app.ui.proof.confidence_view import build_char_views
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    line = state.lines[0]
+    first_atom = replace(line.atoms[0], char_span=None, geometry_available=False)
+    second_atom = replace(line.atoms[1], char_span=(1, 2), geometry_available=True)
+    next_line = replace(line, atoms=(first_atom, second_atom))
+    entries = build_char_views(next_line, workspace.pages[0])
+
+    assert entries[0].atom_uid is None
+    assert entries[0].available is False
+    assert entries[1].atom_uid == "atom-2"
+    assert entries[1].bbox == (30, 10, 50, 30)
+
+
 def test_hproof_does_not_invent_atom_mapping_without_explicit_span(
     qapp: QApplication,
     tmp_path: Path,

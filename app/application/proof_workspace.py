@@ -520,9 +520,10 @@ def _line_view(
         # 映射多条 OCR 行时取并集（公式/表格行常见），而不是丢弃几何
         bbox = _bbox_union(line_boxes)
     else:
-        # 行级缺失时回落版面 region 真值（layout 几何是唯一权威来源）
-        region_boxes = [regions_by_uid[uid].bbox for uid in region_uids]
-        bbox = _bbox_union(region_boxes) if region_boxes else None
+        # region_uids 与 mapped_lines 同源，region 兜底不可达；
+        # 字符索引 entry 的 bbox 是唯一可达的备用几何真值
+        entry_boxes = [item.bbox for item in entries if item.bbox is not None]
+        bbox = _bbox_union(entry_boxes) if entry_boxes else None
     return ProofLineView(
         proof_uid=state.uid,
         batch_uid=batch.uid,

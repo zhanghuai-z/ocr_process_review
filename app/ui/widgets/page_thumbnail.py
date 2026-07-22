@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImageReader, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 from app.ui.widgets.effects import apply_soft_shadow
@@ -35,25 +35,34 @@ def make_page_thumbnail(
     height: int = PAGE_THUMB_H,
     device_pixel_ratio: float = 1.0,
 ) -> QPixmap:
-    """Cover-style thumbnail: expanding scale + centered crop, DPR aware."""
+    """Cover-style thumbnail: expanding scale + centered crop, DPR aware.
+
+    Decoding goes through ``QImageReader.setScaledSize`` so a 600 DPI page
+    is never fully decoded on the UI thread just to make a 150px thumb.
+    """
 
     if not image_path:
-        return QPixmap()
-    source = QPixmap(image_path)
-    if source.isNull():
         return QPixmap()
     dpr = max(1.0, float(device_pixel_ratio))
     target_w = max(1, round(width * dpr))
     target_h = max(1, round(height * dpr))
-    scaled = source.scaled(
-        target_w,
-        target_h,
-        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-        Qt.TransformationMode.SmoothTransformation,
+    reader = QImageReader(image_path)
+    source_size = reader.size()
+    if source_size.width() <= 0 or source_size.height() <= 0:
+        return QPixmap()
+    scale = max(target_w / source_size.width(), target_h / source_size.height())
+    reader.setScaledSize(
+        QSize(
+            max(target_w, round(source_size.width() * scale)),
+            max(target_h, round(source_size.height() * scale)),
+        )
     )
-    x = max(0, (scaled.width() - target_w) // 2)
-    y = max(0, (scaled.height() - target_h) // 2)
-    thumb = scaled.copy(x, y, target_w, target_h)
+    image = reader.read()
+    if image.isNull():
+        return QPixmap()
+    x = max(0, (image.width() - target_w) // 2)
+    y = max(0, (image.height() - target_h) // 2)
+    thumb = QPixmap.fromImage(image.copy(x, y, target_w, target_h))
     thumb.setDevicePixelRatio(dpr)
     return thumb
 

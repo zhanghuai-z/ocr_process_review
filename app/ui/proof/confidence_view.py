@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from app.application.proof_workspace import ProofLineView, ProofPageView
+from app.application.proof_workspace import ProofAtomView, ProofLineView, ProofPageView
 
 
 def normalize_confidence(raw: object) -> float | None:
@@ -60,49 +60,42 @@ def build_char_views(
 ) -> tuple[ProofCharView, ...]:
     """Project proof characters onto the atoms already present in a line view.
 
-    Atom text is the only character-to-atom relation carried by the immutable
-    application view.  Characters beyond that relation remain visible but are
-    explicitly marked unavailable; no OCR record or legacy index is queried.
+    The explicit ``atom.char_span`` carried by the immutable view is the
+    only character-to-atom relation used here.  Atoms without a span claim
+    no characters; characters without a span stay visible but are marked
+    unavailable.  Sequential guessing by atom text length is deliberately
+    not a fallback: one missing span would misalign every later character.
     """
 
     if line.page_uid != page.page_uid:
         raise ValueError("line and page views must reference the same page UID")
 
-    atoms = tuple(sorted(line.atoms, key=lambda atom: (atom.atom_index, atom.atom_uid)))
-    result: list[ProofCharView] = []
-    atom_position = 0
-    atom_offset = 0
-    for char_index, text_char in enumerate(line.proof_text):
-        atom = None
-        while atom_position < len(atoms):
-            candidate = atoms[atom_position]
-            if atom_offset < len(candidate.text):
-                atom = candidate
-                break
-            atom_position += 1
-            atom_offset = 0
-        if atom is None:
-            result.append(
-                ProofCharView(
-                    proof_uid=line.proof_uid,
-                    text_unit_uid=line.text_unit_uid,
-                    char_index=char_index,
-                    text=text_char,
-                    page_uid=page.page_uid,
-                    page_number=page.page_number,
-                    image_path=page.image_path,
-                    line_uid=line.line_uid,
-                    region_uid=line.region_uid,
-                    atom_uid=None,
-                    atom_index=None,
-                    bbox=None,
-                    confidence=None,
-                    ocr_char=None,
-                    available=False,
-                )
-            )
+    by_char_index: dict[int, tuple[ProofAtomView, int]] = {}
+    for atom in sorted(line.atoms, key=lambda item: (item.atom_index, item.atom_uid)):
+        span = atom.char_span
+        if span is None:
             continue
-        ocr_char = atom.text[atom_offset]
+        start, end = span
+        for offset, char_index in enumerate(range(start, end)):
+            if char_index >= len(line.proof_text):
+                raise ValueError(
+                    f"atom {atom.atom_uid!r} char span exceeds proof text length"
+                )
+            if char_index in by_char_index:
+                raise ValueError(
+                    f"proof character index {char_index} maps to multiple atoms"
+                )
+            by_char_index[char_index] = (atom, offset)
+
+    result: list[ProofCharView] = []
+    for char_index, text_char in enumerate(line.proof_text):
+        mapped = by_char_index.get(char_index)
+        atom, offset = mapped if mapped is not None else (None, -1)
+        ocr_char = (
+            atom.text[offset]
+            if atom is not None and 0 <= offset < len(atom.text)
+            else None
+        )
         result.append(
             ProofCharView(
                 proof_uid=line.proof_uid,
@@ -112,17 +105,16 @@ def build_char_views(
                 page_uid=page.page_uid,
                 page_number=page.page_number,
                 image_path=page.image_path,
-                line_uid=atom.line_uid,
-                region_uid=atom.region_uid,
-                atom_uid=atom.atom_uid,
-                atom_index=atom.atom_index,
-                bbox=atom.bbox,
-                confidence=normalize_confidence(atom.confidence),
+                line_uid=atom.line_uid if atom is not None else line.line_uid,
+                region_uid=atom.region_uid if atom is not None else line.region_uid,
+                atom_uid=atom.atom_uid if atom is not None else None,
+                atom_index=atom.atom_index if atom is not None else None,
+                bbox=atom.bbox if atom is not None else None,
+                confidence=normalize_confidence(atom.confidence) if atom is not None else None,
                 ocr_char=ocr_char,
-                available=True,
+                available=atom is not None,
             )
         )
-        atom_offset += 1
 
     return tuple(result)
 

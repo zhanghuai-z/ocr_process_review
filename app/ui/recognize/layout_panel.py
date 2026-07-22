@@ -1579,39 +1579,16 @@ class LayoutPanel(QWidget):
         boxes: dict[str, tuple[OcrAtomBox, ...]] = {}
         if workspace is not None:
             for page in workspace.pages:
-                page_boxes: list[OcrAtomBox] = []
-                for region in page.regions:
-                    for line in region.lines:
-                        for atom in line.atoms:
-                            raw_bbox = atom.bbox
-                            if isinstance(raw_bbox, BBox):
-                                geom = raw_bbox
-                            else:
-                                # OCR workspace 的 bbox 是 XYXY 元组，转成几何 BBox
-                                geom = BBox(
-                                    int(raw_bbox[0]),
-                                    int(raw_bbox[1]),
-                                    int(raw_bbox[2]) - int(raw_bbox[0]),
-                                    int(raw_bbox[3]) - int(raw_bbox[1]),
-                                )
-                            if geom.w <= 0 or geom.h <= 0:
-                                # 退化几何的 atom 无法入画（真实数据存在），跳过
-                                continue
-                            confidence = float(atom.confidence)
-                            if confidence > 1.0:
-                                confidence = confidence / 100.0
-                            confidence = max(0.0, min(1.0, confidence))
-                            page_boxes.append(
-                                OcrAtomBox(
-                                    uid=atom.atom_uid,
-                                    bbox=geom,
-                                    text=atom.text,
-                                    confidence=confidence,
-                                    line_uid=line.line_uid,
-                                    block_uid=region.block_uid or "",
-                                )
-                            )
-                boxes[page.page_uid] = tuple(page_boxes)
+                boxes[page.page_uid] = tuple(
+                    OcrAtomBox.from_atom_view(
+                        atom,
+                        line_uid=line.line_uid,
+                        block_uid=region.block_uid or "",
+                    )
+                    for region in page.regions
+                    for line in region.lines
+                    for atom in line.atoms
+                )
         self._atom_boxes_by_page = boxes
         if self._pages:
             self._refresh_current_page_layers()

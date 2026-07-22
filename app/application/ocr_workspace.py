@@ -19,6 +19,7 @@ class OcrAtomView:
     bbox: BBox
     confidence: float
     index: int
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ def build_ocr_workspace_view(session: ProjectSession) -> OcrWorkspaceView:
                     bbox=atom.bbox,
                     confidence=atom.confidence,
                     index=atom.index,
+                    source=atom.source,
                 )
                 for atom in sorted(
                     (ocr.get_atom(atom_uid) for atom_uid in line.atom_uids),

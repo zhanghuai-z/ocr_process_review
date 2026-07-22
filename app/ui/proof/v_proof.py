@@ -24,10 +24,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QIcon,
+    QImageReader,
     QKeySequence,
     QPainter,
     QPen,
@@ -54,6 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.contracts import ProofEditCommand
+from app.application.proof_candidates import has_confusable_entry, ranked_candidates
 from app.application.proof_workspace import (
     ProofLineView,
     ProofPageView,
@@ -68,170 +70,13 @@ from app.ui.widgets.image_viewer import ImageViewer
 
 
 IMAGE_SIZE = QSize(620, 420)
+_ICON_PENDING_ROLE = Qt.ItemDataRole.UserRole + 2
 # Gallery cells mirror the mature delegate: a 56px thumbnail with breathing
 # room inside a 70px grid, six items per row and at most three visible rows.
 GALLERY_THUMB = 56
 GALLERY_CELL = GALLERY_THUMB + 14
 GALLERY_ITEMS_PER_ROW = 6
 LOW_CONF = 0.80
-
-DEFAULT_CONFUSABLE_CANDIDATES = {
-    # 田/由/甲/申 系
-    "田": ["由", "甲", "申", "曲"],
-    "由": ["田", "甲", "申"],
-    "甲": ["田", "由", "申"],
-    "申": ["田", "由", "甲"],
-    # 日/曰/目/口 系
-    "日": ["曰", "目", "口"],
-    "曰": ["日", "目", "口"],
-    "目": ["日", "曰", "自", "首"],
-    "口": ["日", "曰", "囗", "回"],
-    "囗": ["口", "回", "国"],
-    # 己/已/巳 系
-    "己": ["已", "巳"],
-    "已": ["己", "巳"],
-    "巳": ["己", "已"],
-    # 末/未 系
-    "未": ["末", "朱"],
-    "末": ["未", "朱"],
-    "朱": ["未", "末"],
-    # 人/入/八 系
-    "人": ["入", "八", "个"],
-    "入": ["人", "八"],
-    "八": ["人", "入"],
-    # 大/太/犬 系
-    "大": ["太", "犬", "夫"],
-    "太": ["大", "犬", "夫"],
-    "犬": ["大", "太"],
-    "夫": ["大", "天", "夭"],
-    "天": ["夫", "夭", "无"],
-    "夭": ["天", "夫"],
-    # 干/千/午/壬 系
-    "干": ["千", "午", "于"],
-    "千": ["干", "午"],
-    "午": ["干", "千", "牛"],
-    "牛": ["午", "牟"],
-    # 土/士/王/玉/主/王 系
-    "土": ["士", "工"],
-    "士": ["土", "仕"],
-    "王": ["玉", "主", "壬"],
-    "玉": ["王", "主"],
-    "主": ["王", "玉", "住"],
-    "壬": ["王", "工", "土"],
-    # 工/匚 系
-    "工": ["土", "士", "壬"],
-    # 又/叉/义 系
-    "又": ["叉", "义"],
-    "叉": ["又"],
-    "义": ["又", "乂"],
-    # 力/刀/办 系
-    "力": ["刀", "办"],
-    "刀": ["力", "刃"],
-    "刃": ["刀"],
-    # 木/术/本/朩
-    "木": ["术", "本", "朩"],
-    "术": ["木", "朮"],
-    "本": ["木", "未", "末"],
-    # 水/氺/永/冰
-    "水": ["氺", "永", "冰"],
-    "永": ["水", "求"],
-    "冰": ["水", "永"],
-    # 火/灬
-    "火": ["灬", "炎"],
-    # 心/必
-    "心": ["必", "忄"],
-    "必": ["心"],
-    # 巾/币/市
-    "巾": ["币", "市", "布"],
-    "币": ["巾", "市"],
-    "市": ["巾", "币", "布"],
-    "布": ["巾", "市"],
-    # 戊/戌/戍/戎/成
-    "戊": ["戌", "戍", "戎", "成"],
-    "戌": ["戊", "戍", "戎"],
-    "戍": ["戊", "戌", "戎"],
-    "戎": ["戊", "戌", "戍"],
-    "成": ["戊", "戌"],
-    # 凡/几/丸
-    "凡": ["几", "丸"],
-    "几": ["凡", "九"],
-    "丸": ["凡", "九"],
-    "九": ["几", "丸"],
-    # 北/比/此
-    "北": ["比", "兆"],
-    "比": ["北", "此"],
-    "此": ["比"],
-    # 卜/上/下/不
-    "卜": ["上", "下", "不"],
-    "上": ["卜", "下"],
-    "下": ["卜", "上"],
-    "不": ["卜", "丕"],
-    # 千/午/牛/年
-    "年": ["午", "牛"],
-    # 自/白/百
-    "自": ["白", "百", "目"],
-    "白": ["自", "百"],
-    "百": ["白", "自"],
-    # 干/于/亏
-    "于": ["干", "亏", "乎"],
-    "亏": ["于", "夸"],
-    # 风/凤/凡
-    "风": ["凤", "凡"],
-    "凤": ["风", "凡"],
-    # 鸟/乌/马
-    "鸟": ["乌"],
-    "乌": ["鸟"],
-    # 兔/免
-    "兔": ["免", "兑"],
-    "免": ["兔"],
-    # 衣/农/表
-    "衣": ["农", "表"],
-    "农": ["衣"],
-    "表": ["衣"],
-    # 万/方
-    "万": ["方"],
-    "方": ["万"],
-    # 历/厉
-    "历": ["厉"],
-    "厉": ["历"],
-    # 京/亨/享
-    "京": ["亨", "享", "亰"],
-    "亨": ["京", "享"],
-    "享": ["京", "亨"],
-    # 长
-    "长": ["镸"],
-    # 兵/丘
-    "兵": ["丘"],
-    "丘": ["兵"],
-    # 体/休
-    "休": ["体"],
-    "体": ["休"],
-    # 化/华
-    "化": ["华"],
-    "华": ["化"],
-    # 今/令/兮
-    "今": ["令", "兮"],
-    "令": ["今"],
-    "兮": ["今"],
-    # 半/羊/丰
-    "半": ["羊", "丰"],
-    "丰": ["半", "羊"],
-    "羊": ["半", "丰"],
-    # 兄/见/贝/页
-    "兄": ["见", "克"],
-    "见": ["兄", "贝"],
-    "贝": ["见", "页"],
-    "页": ["贝", "顶"],
-    # 圆/园/团
-    "圆": ["园", "团"],
-    "园": ["圆"],
-    "团": ["圆", "园"],
-    # 句/旬/勺
-    "句": ["旬", "勺"],
-    "旬": ["句"],
-    "勺": ["句"],
-}
-
 
 @dataclass(frozen=True, slots=True)
 class _SceneBBox:
@@ -271,28 +116,25 @@ def _page_pixmap(
     bbox: tuple[int, int, int, int] | None,
     target_size: QSize | None = None,
     *,
-    cache: dict[str, QPixmap] | None = None,
     pad: int = 0,
 ) -> QPixmap:
-    """Return a character crop, never a full-page thumbnail.
+    """Return a character crop, never a full-page decode.
 
-    ``cache`` maps ``page_uid`` to a decoded full-page pixmap so repeated
-    crops of one page decode the source image at most once.  ``pad`` expands
-    the crop rect in source pixels before scaling.
+    ``QImageReader.setClipRect`` decodes only the crop region at native
+    resolution; scaling to the target size then uses smooth resampling, so
+    gallery icons for a common character never force dozens of 600 DPI
+    full-page decodes.  ``pad`` expands the crop rect in source pixels.
     """
 
     if bbox is None:
         return QPixmap()
-    source = cache.get(page.page_uid) if cache is not None else None
-    if source is None:
-        source = QPixmap(page.image_path)
-        if cache is not None and not source.isNull():
-            cache[page.page_uid] = source
-    if source.isNull() or page.width <= 0 or page.height <= 0:
+    reader = QImageReader(page.image_path)
+    source_size = reader.size()
+    if source_size.width() <= 0 or page.width <= 0 or page.height <= 0:
         return QPixmap()
     left, top, right, bottom = bbox
-    x_scale = source.width() / page.width
-    y_scale = source.height() / page.height
+    x_scale = source_size.width() / page.width
+    y_scale = source_size.height() / page.height
     crop_rect = QRect(
         round(left * x_scale),
         round(top * y_scale),
@@ -301,12 +143,17 @@ def _page_pixmap(
     )
     if pad > 0:
         crop_rect = crop_rect.adjusted(-pad, -pad, pad, pad)
-    crop_rect = crop_rect.intersected(source.rect())
+    crop_rect = crop_rect.intersected(
+        QRect(0, 0, source_size.width(), source_size.height())
+    )
     if crop_rect.isEmpty():
         return QPixmap()
-    crop = source.copy(crop_rect)
+    reader.setClipRect(crop_rect)
+    image = reader.read()
+    if image.isNull():
+        return QPixmap()
     target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
-    return crop.scaled(
+    return QPixmap.fromImage(image).scaled(
         max(1, target.width()),
         max(1, target.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
@@ -511,6 +358,9 @@ class VProofPanel(QWidget):
         self._gallery.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._gallery.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self._gallery.currentItemChanged.connect(self._on_gallery_changed)
+        self._gallery.verticalScrollBar().valueChanged.connect(
+            self._load_visible_gallery_icons
+        )
         gallery_layout.addWidget(self._gallery, 1)
         center_layout.addWidget(gallery_card, 3)
 
@@ -846,8 +696,10 @@ class VProofPanel(QWidget):
                 "相同字索引" if not self._selected_char else f"相同字索引 · {self._selected_char}"
             )
         for entry in entries:
-            item = QListWidgetItem(self._entry_icon(entry), "")
+            # 图标懒加载：先占位，仅可视范围 ±1 屏的条目真正解码切图
+            item = QListWidgetItem("")
             item.setData(Qt.ItemDataRole.UserRole, entry)
+            item.setData(_ICON_PENDING_ROLE, True)
             item.setToolTip(
                 f"第 {entry.page_number} 页 · {entry.proof_uid}/{entry.text_unit_uid} · 位 #{entry.char_index + 1}"
             )
@@ -864,6 +716,28 @@ class VProofPanel(QWidget):
         self._render_entry(self._selected_entry)
         self._update_candidate_panel(self._selected_entry)
         self._focus_gallery_unless_side_input()
+        QTimer.singleShot(0, self._load_visible_gallery_icons)
+
+    def _load_visible_gallery_icons(self) -> None:
+        """Decode gallery icons only for items near the visible viewport."""
+
+        viewport_rect = self._gallery.viewport().rect()
+        padded = viewport_rect.adjusted(
+            0,
+            -viewport_rect.height(),
+            0,
+            viewport_rect.height(),
+        )
+        for row in range(self._gallery.count()):
+            item = self._gallery.item(row)
+            if not item.data(_ICON_PENDING_ROLE):
+                continue
+            if not self._gallery.visualItemRect(item).intersects(padded):
+                continue
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, ProofCharView):
+                item.setIcon(self._entry_icon(entry))
+            item.setData(_ICON_PENDING_ROLE, False)
 
     def _restore_gallery_selection_by_occurrence_keys(
         self,
@@ -906,12 +780,10 @@ class VProofPanel(QWidget):
         canvas = QPixmap(cell, cell)
         canvas.fill(QColor("#FFFDF8"))
         painter = QPainter(canvas)
-        self._page_source_pixmap(page)  # decodes once per page, keys the cache
         crop = _page_pixmap(
             page,
             entry.bbox,
             QSize(cell - 16, cell - 16),
-            cache=self._page_pixmaps,
             pad=_gallery_crop_pad(entry),
         )
         if not crop.isNull():
@@ -939,9 +811,24 @@ class VProofPanel(QWidget):
         cached = self._page_pixmaps.get(page.page_uid)
         if cached is not None and not cached.isNull():
             return cached
-        pixmap = QPixmap(page.image_path)
-        if not pixmap.isNull():
-            self._remember_page_pixmap(page, pixmap)
+        # 缩放解码（≤2000px 宽）：查看原稿不需要 600 DPI 全尺寸解码
+        reader = QImageReader(page.image_path)
+        source_size = reader.size()
+        if source_size.width() > 2000:
+            reader.setScaledSize(
+                QSize(2000, round(source_size.height() * 2000 / source_size.width()))
+            )
+        image = reader.read()
+        pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        if pixmap.isNull():
+            return pixmap
+        # 小型 LRU：保留最近 2 页（当前 + 上一页），跨页切换不反复解码，
+        # 高分辨率多页项目也不长期持有全页 QPixmap
+        self._remember_page_pixmap(page, pixmap)
+        while len(self._page_pixmaps) > 2:
+            oldest = next(iter(self._page_pixmaps))
+            self._page_pixmaps.pop(oldest, None)
+            self._page_pixmap_keys.pop(oldest, None)
         return pixmap
 
     def _on_gallery_changed(
@@ -1007,19 +894,11 @@ class VProofPanel(QWidget):
         self.proof_edit_requested.emit(command)
 
     def _apply_replacement_to_selected(self, text: str) -> int:
+        # 相同字索引覆盖全项目：批量修改作用于所有选中项，跨页替换按
+        # proof state 分组为各自的 replace_many 命令表达，不做 UI 裁剪
         selected = self._selected_entries()
-        # Conservative multi-select semantics: a batch only touches entries
-        # on the page currently displayed in the viewer; cross-page entries
-        # are skipped and the skip count is reported, never silently edited.
-        scope_page_uid: str | None = None
-        if len(selected) > 1 and self._selected_entry is not None:
-            scope_page_uid = self._selected_entry.page_uid
-        skipped_offpage = 0
         grouped: dict[str, dict[tuple[str, str], dict[int, str]]] = defaultdict(dict)
         for entry in selected:
-            if scope_page_uid is not None and entry.page_uid != scope_page_uid:
-                skipped_offpage += 1
-                continue
             key = (entry.proof_uid, entry.text_unit_uid)
             unit = self._units.get(key)
             if unit is None or entry.char_index >= len(unit.text):
@@ -1050,11 +929,6 @@ class VProofPanel(QWidget):
                 )
             )
             emitted += len(replacements)
-        if skipped_offpage:
-            self._set_status_message(
-                f"已应用到 {emitted} 处（跨页 {skipped_offpage} 处未改）",
-                "ok" if emitted else "error",
-            )
         return emitted
 
     def _gallery_direct_overwrite(self, text: str) -> bool:
@@ -1180,27 +1054,7 @@ class VProofPanel(QWidget):
             self._candidate_panel.setToolTip("")
 
     def _ranked_candidates(self, entry: ProofCharView) -> list[str]:
-        """Aggregate candidates from high to low trust, de-duplicated.
-
-        Priority: the current glyph itself, the OCR source glyph at the same
-        position, then first- and second-level confusables.
-        """
-
-        ranked: list[str] = []
-
-        def push(value: str | None) -> None:
-            if value and value not in ranked:
-                ranked.append(value)
-
-        push(entry.text)
-        push(entry.ocr_char)
-        first_level = DEFAULT_CONFUSABLE_CANDIDATES.get(entry.text, [])
-        for value in first_level:
-            push(value)
-        for first in first_level:
-            for second in DEFAULT_CONFUSABLE_CANDIDATES.get(first, []):
-                push(second)
-        return ranked
+        return list(ranked_candidates(entry.text, entry.ocr_char))
 
     def _diagnose_single_candidate(self, entry: ProofCharView) -> str:
         """Explain why the candidate sources contributed no new glyph."""
@@ -1210,7 +1064,7 @@ class VProofPanel(QWidget):
             reasons.append("OCR 无对应字")
         elif entry.ocr_char == entry.text:
             reasons.append("OCR 与当前字一致")
-        if entry.text not in DEFAULT_CONFUSABLE_CANDIDATES:
+        if not has_confusable_entry(entry.text):
             reasons.append(f"易混淆字典无 '{entry.text}' 条目")
         if not reasons:
             return "（来源均无新字）"

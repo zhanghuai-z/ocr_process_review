@@ -85,6 +85,40 @@ class OcrAtomBox:
         if not isinstance(self.source, str):
             raise TypeError("OCR atom source must be str")
 
+    @classmethod
+    def from_atom_view(cls, atom_view, *, line_uid: str = "", block_uid: str = "") -> "OcrAtomBox":
+        """Adapt one immutable application OCR atom view to a scene box.
+
+        This is the single conversion point between the application DTO
+        (XYXY tuple geometry) and the presentation model (geometry BBox).
+        The application model already guarantees confidence and bbox
+        validity, so no silent fixes happen here.
+        """
+
+        from app.application.ocr_workspace import OcrAtomView
+
+        if not isinstance(atom_view, OcrAtomView):
+            raise TypeError("from_atom_view requires OcrAtomView")
+        raw = atom_view.bbox
+        if isinstance(raw, BBox):
+            geom = raw
+        else:
+            geom = BBox(
+                int(raw[0]),
+                int(raw[1]),
+                int(raw[2]) - int(raw[0]),
+                int(raw[3]) - int(raw[1]),
+            )
+        return cls(
+            uid=atom_view.atom_uid,
+            bbox=geom,
+            text=atom_view.text,
+            confidence=float(atom_view.confidence),
+            line_uid=line_uid,
+            block_uid=block_uid,
+            source=atom_view.source,
+        )
+
 # ── 缩放手柄 ──────────────────────────────────────────────────
 
 _TL, _TM, _TR, _ML, _MR, _BL, _BM, _BR = range(8)
