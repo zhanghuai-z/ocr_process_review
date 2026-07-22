@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 from app.application.proof_workspace import build_proof_workspace_view
@@ -496,6 +496,118 @@ def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> N
         or bool(widget._formula_render_label.text())
     )
     assert has_render
+    panel.close()
+
+
+def test_hproof_recreates_editor_when_row_kind_changes(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel, _FormulaLineSourceEdit
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+    initial = _formula_workspace(
+        workspace,
+        unit,
+        line,
+        state,
+        text="ab",
+        line_kind="text",
+        atoms=line.atoms,
+    )
+    panel = HProofPanel(initial)
+    old_widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert not isinstance(old_widget.editor, _FormulaLineSourceEdit)
+
+    formula_text = r"$E=mc^2$"
+    atom = _inline_atom(
+        line,
+        "atom-f",
+        0,
+        formula_text,
+        (0, len(formula_text)),
+        "formula",
+        (10, 10, 150, 30),
+    )
+    panel.set_workspace(
+        _formula_workspace(
+            workspace,
+            unit,
+            line,
+            state,
+            text=formula_text,
+            line_kind="formula",
+            atoms=(atom,),
+        )
+    )
+
+    new_widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert new_widget is not old_widget
+    assert isinstance(new_widget.editor, _FormulaLineSourceEdit)
+    panel.close()
+
+
+def test_hproof_dirty_formula_rebuild_refreshes_render(qapp, tmp_path, monkeypatch) -> None:
+    import app.ui.proof.h_proof as h_proof
+
+    monkeypatch.setattr(
+        h_proof,
+        "_render_formula_visual",
+        lambda text, target_height: h_proof._FormulaVisual(text=f"render:{text}"),
+    )
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+    text = r"$E=mc^2$"
+    atom = _inline_atom(line, "atom-f", 0, text, (0, len(text)), "formula", (10, 10, 150, 30))
+    panel = h_proof.HProofPanel(
+        _formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=(atom,))
+    )
+    key = ("proof-1", "unit-1")
+    panel._dirty_text[key] = "NEW_FORMULA"
+    panel._render_mode = "uninitialized"
+    panel._render_rows()
+
+    widget = panel._row_widgets[key]
+    assert widget.editor.toPlainText() == "NEW_FORMULA"
+    assert widget._formula_render_label.text() == "render:NEW_FORMULA"
+    panel.close()
+
+
+def test_hproof_long_formula_render_uses_horizontal_scroll(qapp, tmp_path, monkeypatch) -> None:
+    import app.ui.proof.h_proof as h_proof
+
+    pixmap = QPixmap(1200, 40)
+    pixmap.fill(QColor("black"))
+    monkeypatch.setattr(
+        h_proof,
+        "_render_formula_visual",
+        lambda text, target_height: h_proof._FormulaVisual(
+            text=None,
+            pixmap=pixmap,
+            logical_size=pixmap.size(),
+        ),
+    )
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+    text = r"$E=mc^2$"
+    atom = _inline_atom(line, "atom-f", 0, text, (0, len(text)), "formula", (10, 10, 150, 30))
+    panel = h_proof.HProofPanel(
+        _formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=(atom,))
+    )
+    panel.resize(800, 600)
+    panel.show()
+    qapp.processEvents()
+
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert widget._formula_render_label.width() >= pixmap.width()
+    assert widget._formula_render_area.horizontalScrollBar().maximum() > 0
     panel.close()
 
 

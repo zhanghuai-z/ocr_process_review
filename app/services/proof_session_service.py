@@ -51,6 +51,94 @@ class ProofConflictError(ProofSessionError):
     """An editor binding cannot be rebased without losing user input."""
 
 
+def _alignments_after_text_update(
+    current: ProofState,
+    next_units: tuple[ProofTextUnit, ...],
+) -> tuple[tuple[ProofAlignmentSegment, ...], tuple[ProofAlignmentSlice, ...]]:
+    """Carry explicit positional alignment through one proof text mutation.
+
+    Equal-length edits retain their source positions and update the alignment's
+    proof-side text.  A length-changing unit cannot retain a positional mapping,
+    so only that unit's fine-grained slices are retired; later units are shifted
+    to their new proof offsets.
+    """
+
+    old_units = {unit.uid: unit for unit in current.text_units}
+    new_units = {unit.uid: unit for unit in next_units}
+    if set(old_units) != set(new_units):
+        raise ProofSessionError("proof text update changed text-unit membership")
+
+    old_offsets: dict[str, int] = {}
+    new_offsets: dict[str, int] = {}
+    cursor = 0
+    for unit in sorted(current.text_units, key=lambda item: item.order):
+        old_offsets[unit.uid] = cursor
+        cursor += len(unit.text)
+    cursor = 0
+    for unit in sorted(next_units, key=lambda item: item.order):
+        new_offsets[unit.uid] = cursor
+        cursor += len(unit.text)
+
+    segment_unit: dict[str, str] = {}
+    next_segments: list[ProofAlignmentSegment] = []
+    for segment in current.alignment_segments:
+        unit_uid = segment.text_unit_uid
+        old_unit = old_units[unit_uid]
+        new_unit = new_units[unit_uid]
+        old_start = old_offsets[unit_uid]
+        if (segment.proof_start, segment.proof_end) != (
+            old_start,
+            old_start + len(old_unit.text),
+        ):
+            raise ProofSessionError(
+                f"alignment segment {segment.uid!r} does not cover its text unit"
+            )
+        new_start = new_offsets[unit_uid]
+        new_end = new_start + len(new_unit.text)
+        updated = (
+            segment
+            if (segment.proof_start, segment.proof_end) == (new_start, new_end)
+            else replace(
+                segment,
+                proof_start=new_start,
+                proof_end=new_end,
+                revision=segment.revision + 1,
+            )
+        )
+        next_segments.append(updated)
+        segment_unit[segment.uid] = unit_uid
+
+    next_slices: list[ProofAlignmentSlice] = []
+    for item in current.alignment_slices:
+        unit_uid = segment_unit[item.segment_uid]
+        old_unit = old_units[unit_uid]
+        new_unit = new_units[unit_uid]
+        if len(old_unit.text) != len(new_unit.text):
+            continue
+        shift = new_offsets[unit_uid] - old_offsets[unit_uid]
+        new_start = item.proof_start + shift
+        new_end = item.proof_end + shift
+        local_start = item.proof_start - old_offsets[unit_uid]
+        local_end = item.proof_end - old_offsets[unit_uid]
+        proof_text = new_unit.text[local_start:local_end]
+        next_slices.append(
+            item
+            if (
+                item.proof_start,
+                item.proof_end,
+                item.proof_text,
+            ) == (new_start, new_end, proof_text)
+            else replace(
+                item,
+                proof_start=new_start,
+                proof_end=new_end,
+                proof_text=proof_text,
+                revision=item.revision + 1,
+            )
+        )
+    return tuple(next_segments), tuple(next_slices)
+
+
 class ProofRefreshKind(str, Enum):
     UNCHANGED = "unchanged"
     REBIND_REQUIRED = "rebind_required"
@@ -166,7 +254,13 @@ class ProofSessionService:
             revision=unit.revision + 1,
         )
         units = tuple(next_unit if item.uid == unit.uid else item for item in current.text_units)
-        stored = self._replace_state(current, text_units=units)
+        segments, slices = _alignments_after_text_update(current, units)
+        stored = self._replace_state(
+            current,
+            text_units=units,
+            alignment_segments=segments,
+            alignment_slices=slices,
+        )
         self._record_history(current, stored, ProofOperation.TEXT)
         return self._result(
             ProofOperation.TEXT,
@@ -230,7 +324,14 @@ class ProofSessionService:
                 current,
                 changed=False,
             )
-        stored = self._replace_state(current, text_units=tuple(next_units))
+        next_units_tuple = tuple(next_units)
+        segments, slices = _alignments_after_text_update(current, next_units_tuple)
+        stored = self._replace_state(
+            current,
+            text_units=next_units_tuple,
+            alignment_segments=segments,
+            alignment_slices=slices,
+        )
         self._record_history(current, stored, ProofOperation.BATCH_TEXT)
         return self._result(
             ProofOperation.BATCH_TEXT,
@@ -298,9 +399,13 @@ class ProofSessionService:
                         revision=unit.revision + 1,
                     )
                 )
+            next_units_tuple = tuple(next_units)
+            segments, slices = _alignments_after_text_update(current, next_units_tuple)
             candidate = replace(
                 current,
-                text_units=tuple(next_units),
+                text_units=next_units_tuple,
+                alignment_segments=segments,
+                alignment_slices=slices,
                 revision=current.revision,
             )
             prepared.append(

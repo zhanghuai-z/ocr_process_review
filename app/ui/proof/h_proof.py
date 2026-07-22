@@ -1935,6 +1935,7 @@ class _ProofRowWidget(QFrame):
         else:
             self._formula_render_label.setPixmap(QPixmap())
             self._formula_render_label.setText("（无法渲染，请直接编辑下方源码）")
+        self._formula_render_label.adjustSize()
 
     def _refresh_atom_visual_overlays(self) -> None:
         """Render inline formula atoms over their exact char spans.
@@ -2747,7 +2748,16 @@ class HProofPanel(QWidget):
         )
         # 结构未变时原位更新：避免每次命令后整树重建（丢焦点/滚动位置）
         visible_keys = [row.key for row in self._visible_rows]
-        if self._render_mode == "list" and visible_keys == list(self._row_widgets.keys()):
+        same_widget_kinds = all(
+            self._row_widgets[row.key].row.kind == row.kind
+            for row in self._visible_rows
+            if row.key in self._row_widgets
+        )
+        if (
+            self._render_mode == "list"
+            and visible_keys == list(self._row_widgets.keys())
+            and same_widget_kinds
+        ):
             for row in self._visible_rows:
                 widget = self._row_widgets[row.key]
                 if widget.row != row:
@@ -2790,6 +2800,7 @@ class HProofPanel(QWidget):
                 widget.editor.blockSignals(False)
                 widget._refresh_editor_geometry()
                 widget._refresh_extra_selections()
+                widget._refresh_formula_render()
             widget.set_conflict(key in self._conflict_keys)
         if self._visible_rows:
             active_key = self._active_key if self._active_key in self._row_widgets else self._visible_rows[0].key

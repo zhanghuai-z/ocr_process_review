@@ -350,6 +350,47 @@ def test_proof_writes_use_aggregate_cas_and_ocr_is_not_mutated() -> None:
         )
 
 
+def test_equal_length_text_edit_updates_explicit_alignment() -> None:
+    session, initial = _session()
+    service = ProofSessionService(session)
+    created = service.create_state(initial)
+    unit = created.state.text_units[0]
+
+    changed = service.replace_text(
+        initial.uid,
+        unit.uid,
+        "ax",
+        expected_revision=created.revision,
+        expected_fingerprint=created.fingerprint,
+        expected_unit_revision=unit.revision,
+        expected_unit_fingerprint=unit.fingerprint,
+    )
+
+    assert changed.state.alignment_slices[0].proof_text == "ax"
+    index = service.build_char_index(changed.state.uid)
+    assert [entry.available for entry in index.entries[:2]] == [True, True]
+
+
+def test_length_change_retires_only_changed_unit_positional_slices() -> None:
+    session, initial = _session()
+    service = ProofSessionService(session)
+    created = service.create_state(initial)
+    unit = created.state.text_units[0]
+
+    changed = service.replace_text(
+        initial.uid,
+        unit.uid,
+        "formula",
+        expected_revision=created.revision,
+        expected_fingerprint=created.fingerprint,
+        expected_unit_revision=unit.revision,
+        expected_unit_fingerprint=unit.fingerprint,
+    )
+
+    assert changed.state.alignment_slices == ()
+    assert changed.state.alignment_segments[0].proof_end == len("formula")
+
+
 def test_batch_status_and_five_step_undo_redo_are_session_operations() -> None:
     session, initial = _session()
     service = ProofSessionService(session)
