@@ -246,6 +246,20 @@ class _FormulaVisual:
     kind: str = "formula"
 
 
+@dataclass(frozen=True, slots=True)
+class _AtomVisualOverlay:
+    """One rendered formula atom placed over its exact text span."""
+
+    start: int
+    end: int
+    left: float
+    right: float
+    text: str
+    pixmap: QPixmap | None = None
+    logical_size: QSize | None = None
+    kind: str = "formula"
+
+
 _LATEX_SYMBOLS = {
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
     "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ",
@@ -402,14 +416,19 @@ def _atom_placements(line: ProofLineView) -> tuple[_AtomPlacement, ...]:
 
 
 def _row_kind(line: ProofLineView, placements: tuple[_AtomPlacement, ...]) -> str:
-    kinds = {
-        kind
-        for kind in (line.render_kind, *(_atom_kind(item.atom) for item in placements))
-        if kind in {"formula", "table"}
-    }
-    if len(kinds) > 1:
-        raise ValueError(f"proof line has conflicting explicit structure kinds: {sorted(kinds)}")
-    return next(iter(kinds), "text")
+    """Line-level presentation kind.
+
+    Only the line's own render kind promotes a row: a text line containing
+    inline formula atoms stays a text row (the atom spans get rendered
+    overlays), while a standalone formula/table region becomes a
+    formula/table row.  `placements` is retained for call-site symmetry.
+    """
+
+    if line.render_kind == "formula":
+        return "formula"
+    if line.render_kind == "table":
+        return "table"
+    return "text"
 
 
 def _row_preview_source(
@@ -509,6 +528,7 @@ class _SlotLineEditor(QWidget):
         self._visual_pixmap_override: QPixmap | None = None
         self._visual_pixmap_logical_size: QSize | None = None
         self._visual_text_kind: str = ""
+        self._atom_visual_overlays: list[_AtomVisualOverlay] = []
         self._undo_stack: list[tuple[str, int, int]] = []
         self._redo_stack: list[tuple[str, int, int]] = []
         self._max_undo = 100
@@ -551,6 +571,19 @@ class _SlotLineEditor(QWidget):
 
     def set_formula_editing_enabled(self, enabled: bool) -> None:
         self._formula_editing_enabled = bool(enabled)
+
+    def set_atom_visual_overlays(self, overlays: list["_AtomVisualOverlay"] | None) -> None:
+        self._atom_visual_overlays = list(overlays or [])
+        self.update()
+
+    def has_atom_visual_overlays(self) -> bool:
+        return bool(self._atom_visual_overlays)
+
+    def atom_visual_overlays(self) -> list["_AtomVisualOverlay"]:
+        return list(self._atom_visual_overlays)
+
+    def slot_geometry(self) -> tuple[list[float | None] | None, list[float] | None]:
+        return self._slot_x_centers, self._slot_widths
 
     def set_visual_formula_override(self, visual: _FormulaVisual | None) -> None:
         if visual is None:
@@ -660,6 +693,9 @@ class _SlotLineEditor(QWidget):
     # ── slot selection / text mutation ─────────────────────────
 
     def _slot_index_for_x(self, x: float, *, nearest: bool = False) -> int:
+        overlay = self._atom_overlay_for_x(x)
+        if overlay is not None:
+            return overlay.start
         text = self.toPlainText()
         centers = self._slot_x_centers or self._fallback_slot_centers(text)
         if not centers:
@@ -697,6 +733,14 @@ class _SlotLineEditor(QWidget):
             if x < first_left - margin or x > last_right + margin:
                 return -1
         return best_idx
+
+    def _atom_overlay_for_x(self, x: float) -> _AtomVisualOverlay | None:
+        for overlay in self._atom_visual_overlays:
+            left = min(overlay.left, overlay.right)
+            right = max(overlay.left, overlay.right)
+            if left <= x <= right:
+                return overlay
+        return None
 
     def _select_slot_index(self, idx: int) -> None:
         text_len = len(self.toPlainText())
@@ -886,7 +930,14 @@ class _SlotLineEditor(QWidget):
                 selected_start, selected_end = -1, -1
             y_baseline = (self.height() + fm.ascent() - fm.descent()) // 2
             n = min(len(text), len(centers))
+            hidden_indices = {
+                idx
+                for overlay in self._atom_visual_overlays
+                for idx in range(max(0, overlay.start), min(len(text), overlay.end))
+            }
             for i in range(n):
+                if i in hidden_indices:
+                    continue
                 center = centers[i]
                 if center is None:
                     continue
@@ -921,8 +972,60 @@ class _SlotLineEditor(QWidget):
                     painter.setPen(QPen(underline, 1))
                     baseline_y = cell.bottom() - 1
                     painter.drawLine(cell.left(), baseline_y, cell.right(), baseline_y)
+            for overlay in self._atom_visual_overlays:
+                self._paint_atom_visual_overlay(
+                    painter,
+                    overlay,
+                    selected_start=selected_start,
+                    selected_end=selected_end,
+                )
         finally:
             painter.end()
+
+    def _paint_atom_visual_overlay(
+        self,
+        painter: QPainter,
+        overlay: _AtomVisualOverlay,
+        *,
+        selected_start: int,
+        selected_end: int,
+    ) -> None:
+        left = int(round(min(overlay.left, overlay.right)))
+        right = int(round(max(overlay.left, overlay.right)))
+        rect = QRect(left, 2, max(1, right - left), self.height() - 4)
+        hovered = overlay.start <= self._last_hover_idx < overlay.end
+        selected = selected_start < overlay.end and selected_end > overlay.start
+        if hovered:
+            painter.fillRect(rect, QColor("#e8f0fe"))
+        if selected:
+            painter.fillRect(rect, QColor("#cfe2ff"))
+        if hovered or selected:
+            painter.setPen(QPen(QColor("#9cc2ff"), 1))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        if overlay.pixmap is not None and not overlay.pixmap.isNull():
+            pixmap = overlay.pixmap
+            max_w = max(1, rect.width() - 4)
+            max_h = max(1, rect.height() - 4)
+            target_w = overlay.logical_size.width() if overlay.logical_size is not None else max_w
+            target_h = overlay.logical_size.height() if overlay.logical_size is not None else max_h
+            scale = min(max_w / max(1, target_w), max_h / max(1, target_h), 1.0)
+            draw_w = max(1, int(round(target_w * scale)))
+            draw_h = max(1, int(round(target_h * scale)))
+            target = QRect(
+                rect.x() + max(0, (rect.width() - draw_w) // 2),
+                rect.y() + max(0, (rect.height() - draw_h) // 2),
+                draw_w,
+                draw_h,
+            )
+            painter.drawPixmap(target, pixmap)
+            return
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        if overlay.kind == "formula":
+            font.setItalic(True)
+        painter.setFont(font)
+        painter.setPen(QPen(self.palette().text().color(), 1))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, overlay.text)
 
     def _paint_visual_text_override(self, painter: QPainter, text: str) -> None:
         font = QFont(self.font())
@@ -1026,10 +1129,18 @@ class _SlotLineEditor(QWidget):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.RightButton:
             pos = self._event_pos(event)
-            if self._formula_editing_enabled or self.has_visual_text_override():
+            text_len = len(self.toPlainText())
+            overlay = self._atom_overlay_for_x(float(pos.x()))
+            if overlay is not None and overlay.kind == "formula":
+                self.formula_source_requested.emit(
+                    max(0, min(overlay.start, text_len)),
+                    max(0, min(overlay.end, text_len)),
+                    self.mapToGlobal(pos),
+                )
+            elif self._formula_editing_enabled or self.has_visual_text_override():
                 self.formula_source_requested.emit(
                     0,
-                    len(self.toPlainText()),
+                    text_len,
                     self.mapToGlobal(pos),
                 )
             else:
@@ -1041,6 +1152,22 @@ class _SlotLineEditor(QWidget):
             return
         self.row_focus_requested.emit()
         pos = self._event_pos(event)
+        overlay = self._atom_overlay_for_x(float(pos.x()))
+        if overlay is not None:
+            # 点击渲染公式段：整段选中（等同一组槽位），不逐字定位
+            cur = QTextCursor(self._document)
+            cur.setPosition(max(0, min(overlay.start, len(self.toPlainText()))))
+            cur.setPosition(
+                max(0, min(overlay.end, len(self.toPlainText()))),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.setTextCursor(cur)
+            self.setFocus()
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
         idx = self._slot_index_for_x(float(pos.x()), nearest=True)
         if idx >= 0:
             self._select_slot_index(idx)
@@ -1169,6 +1296,123 @@ class _SlotLineEditor(QWidget):
         text = event.text()
         if text and text.isprintable() and not ctrl:
             self._replace_selected_slots(text)
+            return
+        super().keyPressEvent(event)
+
+
+class _FormulaLineSourceEdit(QPlainTextEdit):
+    """Inline source editor used as the third row of display-formula rows.
+
+    Unlike the slot editor it owns plain source text (LaTeX), so its length
+    may change freely; commits flow through the same panel pipeline as slot
+    edits.  Long source scrolls horizontally instead of being truncated.
+    Geometry/verdict/slot APIs are accepted as no-ops so the row widget can
+    treat both editor kinds uniformly.
+    """
+
+    confirm_requested = Signal()
+    prev_requested = Signal()
+    next_requested = Signal()
+    flag_requested = Signal()
+    skip_requested = Signal()
+    revert_requested = Signal()
+    save_all_requested = Signal()
+    formula_source_requested = Signal(int, int, QPoint)
+    hover_char_changed = Signal(int)
+    row_focus_requested = Signal()
+    selectionChanged = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTabChangesFocus(False)
+        mono = QFont(self.font())
+        mono.setFamilies(["JetBrains Mono", "Consolas", "monospace"])
+        mono.setPixelSize(14)
+        self.setFont(mono)
+        self.cursorPositionChanged.connect(self.selectionChanged)
+
+    # ── uniform no-op surface consumed by the row widget ───────
+
+    def set_slot_geometry(self, *_args, **_kwargs) -> None:
+        return
+
+    def set_active_visual(self, *_args, **_kwargs) -> None:
+        return
+
+    def set_formula_editing_enabled(self, *_args, **_kwargs) -> None:
+        return
+
+    def set_visual_formula_override(self, *_args, **_kwargs) -> None:
+        return
+
+    def set_visual_text_override(self, *_args, **_kwargs) -> None:
+        return
+
+    def has_visual_text_override(self) -> bool:
+        return False
+
+    def visual_text_content_width(self) -> int:
+        return 0
+
+    def set_atom_visual_overlays(self, *_args, **_kwargs) -> None:
+        return
+
+    def slot_geometry(self):
+        return None, None
+
+    def replace_text_range(self, start: int, end: int, replacement: str) -> None:
+        current = self.toPlainText()
+        start = max(0, min(int(start), len(current)))
+        end = max(start, min(int(end), len(current)))
+        cursor = self.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cursor.insertText(replacement or "")
+
+    # ── events ─────────────────────────────────────────────────
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        self.row_focus_requested.emit()
+        super().focusInEvent(event)
+
+    def focusNextPrevChild(self, next_child: bool) -> bool:  # type: ignore[override]
+        return False
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        key = event.key()
+        mod = event.modifiers()
+        no_mod = mod == Qt.KeyboardModifier.NoModifier
+        ctrl = bool(mod & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mod & Qt.KeyboardModifier.ShiftModifier)
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and no_mod:
+            self.confirm_requested.emit()
+            return
+        if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab and shift):
+            self.prev_requested.emit()
+            return
+        if key == Qt.Key.Key_Tab and no_mod:
+            self.next_requested.emit()
+            return
+        if ctrl and key == Qt.Key.Key_S:
+            self.save_all_requested.emit()
+            return
+        if key == Qt.Key.Key_Up and ctrl:
+            self.prev_requested.emit()
+            return
+        if key == Qt.Key.Key_Down and ctrl:
+            self.next_requested.emit()
+            return
+        if key == Qt.Key.Key_F5:
+            self.flag_requested.emit()
+            return
+        if key == Qt.Key.Key_F6:
+            self.skip_requested.emit()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.revert_requested.emit()
             return
         super().keyPressEvent(event)
 
@@ -1387,12 +1631,6 @@ class _ProofRowWidget(QFrame):
         header.addWidget(self._title, 1)
         self._status = QLabel()
         header.addWidget(self._status)
-        self._preview_button = QPushButton()
-        self._preview_button.setObjectName("proofPreviewButton")
-        self._preview_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._preview_button.setVisible(row.kind == "formula")
-        self._preview_button.clicked.connect(self._toggle_preview)
-        header.addWidget(self._preview_button)
         content_layout.addLayout(header)
 
         self._image = _ProofLineImage()
@@ -1410,23 +1648,51 @@ class _ProofRowWidget(QFrame):
         self._image.clicked.connect(self._on_image_clicked)
         content_layout.addWidget(self._image)
 
+        # display formula 三行呈现：crop → 渲染 → 源码编辑
+        self._formula_render_area = QScrollArea()
+        self._formula_render_area.setObjectName("proofFormulaRender")
+        self._formula_render_area.setFixedHeight(56)
+        self._formula_render_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._formula_render_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._formula_render_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._formula_render_label = QLabel()
+        self._formula_render_label.setObjectName("proofFormulaRenderLabel")
+        self._formula_render_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._formula_render_area.setWidget(self._formula_render_label)
+        self._formula_render_area.setVisible(row.kind == "formula")
+        content_layout.addWidget(self._formula_render_area)
+
         self._active = False
         self._external_conflict = False
         self._status_value = row.unit.status
-        self._preview_visible = row.kind == "formula"
         self._formula_source_range: tuple[int, int] | None = None
         self._formula_popup: _FormulaSourcePopup | None = None
+        self._formula_render_timer = QTimer(self)
+        self._formula_render_timer.setSingleShot(True)
+        self._formula_render_timer.setInterval(160)
+        self._formula_render_timer.timeout.connect(self._refresh_formula_render)
 
-        self.editor = _SlotLineEditor()
-        self.editor.setObjectName("proofSlotEditor")
+        if row.kind == "formula":
+            self.editor = _FormulaLineSourceEdit()
+            self.editor.setObjectName("formulaSourceEdit")
+            self.editor.setPlaceholderText("公式源码")
+        else:
+            self.editor = _SlotLineEditor()
+            self.editor.setObjectName("proofSlotEditor")
+            self.editor.setPlaceholderText("校对文本")
+            self.editor.setCursorWidth(0)
         self.editor.set_formula_editing_enabled(row.kind == "formula")
-        self.editor.setFrameShape(None)
-        self.editor.setLineWrapMode(None)
+        self.editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.editor.setFixedHeight(TEXT_EDITOR_DEFAULT_H)
         self.editor.document().setDocumentMargin(0)
-        self.editor.setCursorWidth(0)
-        self.editor.setPlaceholderText("校对文本")
         self.editor.confirm_requested.connect(self.confirm_requested)
         self.editor.prev_requested.connect(lambda: self.navigate_requested.emit(-1))
         self.editor.next_requested.connect(lambda: self.navigate_requested.emit(1))
@@ -1438,6 +1704,7 @@ class _ProofRowWidget(QFrame):
         self.editor.row_focus_requested.connect(self.activated)
         self.editor.textChanged.connect(self._refresh_editor_geometry)
         self.editor.textChanged.connect(self._refresh_extra_selections)
+        self.editor.textChanged.connect(self._schedule_formula_render)
         self.editor.cursorPositionChanged.connect(self._on_cursor_position_changed)
         self.editor.cursorPositionChanged.connect(self._refresh_extra_selections)
         self.editor.selectionChanged.connect(self._refresh_extra_selections)
@@ -1448,7 +1715,7 @@ class _ProofRowWidget(QFrame):
         self.editor.setPlainText(row.unit.text)
         self.set_status(row.unit.status)
         self.set_active(False)
-        self._apply_editor_visual_override()
+        self._refresh_formula_render()
         self._refresh_image()
 
     # ── status / conflict ──────────────────────────────────────
@@ -1464,7 +1731,7 @@ class _ProofRowWidget(QFrame):
         self.row = row
         self._status_value = row.unit.status
         self._refresh_status()
-        self._apply_editor_visual_override()
+        self._refresh_formula_render()
         self._refresh_editor_geometry()
         self._refresh_extra_selections()
 
@@ -1539,7 +1806,8 @@ class _ProofRowWidget(QFrame):
 
         Cursor width is 0; the weak cursor is expressed entirely through
         these selections.  ``user_modified`` only adds an underline — it
-        never changes the verdict colour (no whitewashing).
+        never changes the verdict colour (no whitewashing).  Display-formula
+        source rows skip verdict colouring: LaTeX source is not proof text.
         """
 
         from PySide6.QtWidgets import QTextEdit
@@ -1548,7 +1816,7 @@ class _ProofRowWidget(QFrame):
         doc_text = editor.toPlainText()
         sels: list = []
 
-        if self._chars_aligned():
+        if self.row.kind != "formula" and self._chars_aligned():
             for i in range(min(len(self.row.entries), len(doc_text))):
                 verdict = self._classify_char_verdict(i)
                 if verdict is None:
@@ -1619,7 +1887,7 @@ class _ProofRowWidget(QFrame):
                 else (NEAR_IMAGE_ROW_H if depth == "near" else FAR_IMAGE_ROW_H)
             )
         )
-        extra = 48 if (self.row.kind == "formula" and not self._large_image) else 0
+        extra = 64 if (self.row.kind == "formula" and not self._large_image) else 0
         if active:
             if self._large_image:
                 min_h, max_h = TABLE_LINE_PAIR_MIN_H, TABLE_LINE_PAIR_MAX_H
@@ -1639,38 +1907,86 @@ class _ProofRowWidget(QFrame):
 
     # ── formula visual layer / source editing ─────────────────
 
-    def _apply_editor_visual_override(self) -> None:
-        """Formula rows show the rendered formula in place of raw source."""
+    def _schedule_formula_render(self) -> None:
+        if self.row.kind == "formula":
+            self._formula_render_timer.start()
+
+    def _refresh_formula_render(self) -> None:
+        """Display-formula rows: middle row shows the rendered formula.
+
+        The rendering is a pure preview rebuilt from the editor's source
+        text; it is never stored as business state.
+        """
 
         if self.row.kind != "formula":
-            self.editor.set_visual_text_override(None)
-            self.editor.setReadOnly(False)
+            self._formula_render_area.setVisible(False)
             return
-        if self._preview_visible:
-            visual = _render_formula_visual(
-                self.editor.toPlainText() or self.row.preview_source,
-                target_height=max(
-                    8,
-                    round(max(1, self.editor.height()) * FORMULA_VISUAL_HEIGHT_RATIO),
-                ),
-            )
-            self.editor.set_visual_formula_override(visual)
-            # 有渲染层时 editor 只读（右键开源码编辑）；渲染失败退回可编辑源码
-            self.editor.setReadOnly(visual is not None)
-        else:
-            self.editor.set_visual_text_override(None)
-            self.editor.setReadOnly(False)
-        self._preview_button.setText(
-            "隐藏公式预览" if self._preview_visible else "公式预览"
+        self._formula_render_area.setVisible(True)
+        visual = _render_formula_visual(
+            self.editor.toPlainText(),
+            target_height=40,
         )
-        content_width = self.editor.visual_text_content_width()
-        self.editor.setMinimumWidth(min(content_width, 720) if content_width else 0)
+        if visual is not None and visual.pixmap is not None:
+            self._formula_render_label.setPixmap(visual.pixmap)
+            self._formula_render_label.setText("")
+        elif visual is not None and visual.text:
+            self._formula_render_label.setPixmap(QPixmap())
+            self._formula_render_label.setText(visual.text)
+        else:
+            self._formula_render_label.setPixmap(QPixmap())
+            self._formula_render_label.setText("（无法渲染，请直接编辑下方源码）")
 
-    def _toggle_preview(self) -> None:
-        if self.row.kind != "formula":
-            return
-        self._preview_visible = not self._preview_visible
-        self._apply_editor_visual_override()
+    def _refresh_atom_visual_overlays(self) -> None:
+        """Render inline formula atoms over their exact char spans.
+
+        Placement comes only from ``ProofAtomView.char_span`` projected
+        through the slot geometry; there is deliberately no regex or text
+        search fallback.  When the text diverges from the snapshot length
+        (e.g. mid-edit), overlays hide until the next snapshot.
+        """
+
+        overlays: list[_AtomVisualOverlay] = []
+        text = self.editor.toPlainText()
+        centers, widths = self.editor.slot_geometry()
+        if (
+            centers is not None
+            and widths is not None
+            and len(text) == len(self.row.line.proof_text)
+        ):
+            for placement in self.row.atom_placements:
+                if _atom_kind(placement.atom) != "formula":
+                    continue
+                indices = placement.char_indices
+                if not indices:
+                    continue
+                if any(
+                    index >= len(text) or centers[index] is None
+                    for index in indices
+                ):
+                    continue
+                start, end = indices[0], indices[-1] + 1
+                visual = _render_formula_visual(
+                    text[start:end],
+                    target_height=max(
+                        8,
+                        round(max(1, self.editor.height()) * FORMULA_VISUAL_HEIGHT_RATIO),
+                    ),
+                )
+                if visual is None:
+                    continue
+                overlays.append(
+                    _AtomVisualOverlay(
+                        start=start,
+                        end=end,
+                        left=centers[indices[0]] - widths[indices[0]] / 2.0,
+                        right=centers[indices[-1]] + widths[indices[-1]] / 2.0,
+                        text=visual.text or "",
+                        pixmap=visual.pixmap,
+                        logical_size=visual.logical_size,
+                        kind="formula",
+                    )
+                )
+        self.editor.set_atom_visual_overlays(overlays)
 
     def _open_formula_source_editor(self, start: int, end: int, global_pos: QPoint) -> None:
         text = self.editor.toPlainText()
@@ -1694,14 +2010,12 @@ class _ProofRowWidget(QFrame):
             return
         self.editor.replace_text_range(start, end, source)
         self._formula_source_range = (start, start + len(source))
-        if self._preview_visible:
-            self._apply_editor_visual_override()
         self._refresh_status()
 
     def _on_formula_popup_closed(self) -> None:
         self._formula_source_range = None
-        if self.row.kind == "formula":
-            self._apply_editor_visual_override()
+        self._refresh_editor_geometry()
+        self._refresh_status()
 
     # ── line image ─────────────────────────────────────────────
 
@@ -1825,7 +2139,10 @@ class _ProofRowWidget(QFrame):
         spans: dict[int, tuple[float, float]] = {}
         proof_text = self.row.line.proof_text
         for placement in self.row.atom_placements:
-            if _atom_kind(placement.atom) is not None:
+            # display formula/table 行不使用槽位几何（源码编辑/表格视图）；
+            # 但文本行内的 inline formula atom 必须参与投影，
+            # 其 char_span 是覆盖层放置的唯一依据
+            if self.row.kind != "text" and _atom_kind(placement.atom) is not None:
                 continue
             indices = placement.char_indices
             if not indices:
@@ -1855,8 +2172,13 @@ class _ProofRowWidget(QFrame):
 
         Both are visual-only: when an edit changes the number of characters,
         the OCR geometry no longer describes the text, so both projections
-        are dropped until a new workspace snapshot arrives.
+        are dropped until a new workspace snapshot arrives.  Display-formula
+        rows use a plain source editor and skip geometry entirely.
         """
+
+        if self.row.kind == "formula":
+            self._refresh_atom_visual_overlays()
+            return
 
         text = self.editor.toPlainText()
         displayed_width = self._displayed_pixmap_size.width()
@@ -1941,6 +2263,7 @@ class _ProofRowWidget(QFrame):
             self.editor.set_slot_geometry(slot_centers, slot_widths)
         else:
             self.editor.set_slot_geometry(None, None)
+        self._refresh_atom_visual_overlays()
 
     # ── char lookup (cursor ↔ image) ───────────────────────────
 

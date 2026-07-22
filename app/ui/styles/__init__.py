@@ -1132,6 +1132,14 @@ QPlainTextEdit#formulaSourceEdit {{
     font-size: {font_size_sm};
     color: {text_primary};
 }}
+QScrollArea#proofFormulaRender {{
+    background: {bg_card};
+    border: none;
+}}
+QLabel#proofFormulaRenderLabel {{
+    background: transparent;
+    border: none;
+}}
 QPushButton#proofConfirmBtn {{
     background: {brand};
     color: {text_on_brand};

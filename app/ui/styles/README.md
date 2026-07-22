@@ -48,6 +48,7 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize；旧 dark/dark_teal 会
 - `proofSlotEditor` — 横校逐字槽位编辑器（自绘，仅接管背景/边框）
 - `proofProgressPopup` — 横校进度环点击弹出的统计浮层
 - `formulaSourcePopup` / `formulaSourceLabel` / `formulaSourceEdit` — 横校公式源码编辑浮层（右键唤起）
+- `proofFormulaRender` / `proofFormulaRenderLabel` — 横校 display 公式渲染行（三行呈现的中行）
 
 ### 标签
 - `sectionTitle` — 卡片标题（品牌色 14px bold）

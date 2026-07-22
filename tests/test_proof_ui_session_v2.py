@@ -388,57 +388,228 @@ def test_hproof_projects_atom_geometry_into_editor_typography(
     panel.close()
 
 
-def test_hproof_formula_and_table_rows_have_explicit_preview_entries(
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
+def _formula_workspace(workspace, unit, line, state, *, text, line_kind, atoms):
+    next_unit = replace(unit, text=text)
+    next_line = replace(
+        line,
+        ocr_text=text,
+        proof_text=text,
+        bbox=(10, 10, 10 + len(text) * 20, 30),
+        render_kind=line_kind,
+        atoms=atoms,
+    )
+    next_state = replace(state, text_units=(next_unit,), lines=(next_line,))
+    return replace(workspace, proof_states=(next_state,), lines=(next_line,))
+
+
+def _inline_atom(line, uid, index, text, span, kind, bbox):
+    return replace(
+        line.atoms[0],
+        atom_uid=uid,
+        atom_index=index,
+        text=text,
+        render_kind=kind,
+        char_span=span,
+        geometry_available=span is not None,
+        bbox=bbox,
+    )
+
+
+def test_hproof_plain_text_row_has_no_formula_overlay(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert widget.row.kind == "text"
+    assert widget._formula_render_area.isHidden()
+    widget._image.resize(200, 58)
+    widget._refresh_image()
+    assert widget.editor.atom_visual_overlays() == []
+    panel.close()
+
+
+def test_hproof_inline_formula_atoms_render_over_exact_spans(qapp, tmp_path) -> None:
     from app.ui.proof.h_proof import HProofPanel
 
     session, _service = _session(tmp_path)
     workspace = build_proof_workspace_view(session)
-    state = workspace.proof_states[0]
-    unit = state.text_units[0]
-    line = state.lines[0]
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    atoms = (
+        _inline_atom(line, "atom-a", 0, "a", (0, 1), "text", (10, 10, 30, 30)),
+        _inline_atom(line, "atom-x", 1, "X", (1, 2), "formula", (30, 10, 50, 30)),
+        _inline_atom(line, "atom-b", 2, "b", (2, 3), "text", (50, 10, 70, 30)),
+    )
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text="aXb", line_kind="text", atoms=atoms))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    # 含 inline formula 的文本行保持 text 行
+    assert widget.row.kind == "text"
+    widget._image.resize(400, 58)
+    widget._refresh_image()
+    overlays = widget.editor.atom_visual_overlays()
+    assert len(overlays) == 1
+    assert (overlays[0].start, overlays[0].end) == (1, 2)
+    assert overlays[0].kind == "formula"
+    panel.close()
 
-    def workspace_with_text(text: str, render_kind: str = "text"):
-        next_unit = replace(unit, text=text)
-        atom = replace(
-            line.atoms[0],
-            text=text,
-            render_kind=render_kind,
-            char_span=(0, len(text)),
-            geometry_available=True,
-        )
-        next_line = replace(
-            line,
-            ocr_text=text,
-            proof_text=text,
-            bbox=None,
-            render_kind=render_kind,
-            atoms=(atom,),
-        )
-        next_state = replace(state, text_units=(next_unit,), lines=(next_line,))
-        return replace(workspace, proof_states=(next_state,), lines=(next_line,))
 
-    formula_panel = HProofPanel(workspace_with_text(r"$E=mc^2$", "formula"))
-    formula_widget = formula_panel._row_widgets[("proof-1", "unit-1")]
-    assert formula_widget.row.kind == "formula"
-    assert formula_widget._preview_button.text() == "隐藏公式预览"
-    formula_widget._toggle_preview()
-    assert formula_widget._preview_visible is False
-    formula_panel.close()
+def test_hproof_multiple_inline_formulas_render_independently(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
 
-    table_panel = HProofPanel(workspace_with_text("a|b\nc|d", "table"))
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    atoms = (
+        _inline_atom(line, "atom-a", 0, "a", (0, 1), "text", (10, 10, 30, 30)),
+        _inline_atom(line, "atom-x", 1, "X", (1, 2), "formula", (30, 10, 50, 30)),
+        _inline_atom(line, "atom-b", 2, "b", (2, 3), "text", (50, 10, 70, 30)),
+        _inline_atom(line, "atom-y", 3, "Y", (3, 4), "formula", (70, 10, 90, 30)),
+        _inline_atom(line, "atom-c", 4, "c", (4, 5), "text", (90, 10, 110, 30)),
+    )
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text="aXbYc", line_kind="text", atoms=atoms))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert widget.row.kind == "text"
+    widget._image.resize(600, 58)
+    widget._refresh_image()
+    overlays = widget.editor.atom_visual_overlays()
+    assert [(item.start, item.end) for item in overlays] == [(1, 2), (3, 4)]
+    panel.close()
+
+
+def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel, _FormulaLineSourceEdit
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    text = r"$E=mc^2$"
+    atoms = (_inline_atom(line, "atom-f", 0, text, (0, len(text)), "formula", (10, 10, 150, 30)),)
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=atoms))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert widget.row.kind == "formula"
+    # 三行：crop（图像）、渲染区、源码编辑器
+    assert isinstance(widget.editor, _FormulaLineSourceEdit)
+    assert widget.editor.objectName() == "formulaSourceEdit"
+    assert not widget._formula_render_area.isHidden()
+    has_render = (
+        not widget._formula_render_label.pixmap().isNull()
+        or bool(widget._formula_render_label.text())
+    )
+    assert has_render
+    panel.close()
+
+
+def test_hproof_formula_source_edit_commits_once(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    text = r"$E=mc^2$"
+    atoms = (_inline_atom(line, "atom-f", 0, text, (0, len(text)), "formula", (10, 10, 150, 30)),)
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=atoms))
+    commands = []
+    panel.proof_edit_requested.connect(commands.append)
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    widget.editor.setPlainText(r"$E=mc^3$")
+    assert panel.save() is True
+    assert len(commands) == 1
+    assert commands[0].op == "replace_many"
+    assert commands[0].replacements == (("unit-1", r"$E=mc^3$"),)
+    # 权威文本仍是会话存储，UI 只发命令不落地
+    assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
+    panel.close()
+
+
+def test_hproof_formula_geometry_unavailable_shows_source(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel, _FormulaLineSourceEdit
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    text = r"$E=mc^2$"
+    atoms = (_inline_atom(line, "atom-f", 0, text, None, "formula", (10, 10, 150, 30)),)
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=atoms))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    # 几何不可用：不伪造覆盖层，源码编辑保持可用
+    assert isinstance(widget.editor, _FormulaLineSourceEdit)
+    assert not widget.editor.isReadOnly()
+    panel.close()
+
+
+def test_hproof_inline_overlay_hidden_for_missing_span(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    atoms = (
+        _inline_atom(line, "atom-a", 0, "a", (0, 1), "text", (10, 10, 30, 30)),
+        _inline_atom(line, "atom-x", 1, "X", None, "formula", (30, 10, 50, 30)),
+    )
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text="aXb", line_kind="text", atoms=atoms))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    widget._image.resize(400, 58)
+    widget._refresh_image()
+    assert widget.editor.atom_visual_overlays() == []
+    panel.close()
+
+
+def test_hproof_formula_edit_then_history_and_external_conflict(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+    text = r"$E=mc^2$"
+    atoms = (_inline_atom(line, "atom-f", 0, text, (0, len(text)), "formula", (10, 10, 150, 30)),)
+    panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=atoms))
+    commands = []
+    panel.proof_edit_requested.connect(commands.append)
+    row = panel._rows[0]
+    widget = panel._row_widgets[row.key]
+
+    widget.editor.setPlainText(r"$E=mc^3$")
+    panel._apply_history(row, -1)
+    panel._apply_history(row, 1)
+    assert [command.op for command in commands] == ["undo", "redo"]
+
+    # 外部变更 + 本地 dirty → 冲突而不是覆盖
+    current = service.get_state("proof-1")
+    service.replace_text(
+        "proof-1", "unit-1", r"$E=mc^4$",
+        expected_revision=current.revision,
+        expected_fingerprint=current.fingerprint,
+    )
+    panel.set_workspace(build_proof_workspace_view(session))
+    widget2 = panel._row_widgets[row.key]
+    assert row.key in panel._conflict_keys
+    assert widget2.editor.toPlainText() == r"$E=mc^3$"
+    before = len(commands)
+    panel._commit_row(row, widget2)
+    assert len(commands) == before  # 冲突行拒写
+    panel.close()
+
+
+def test_hproof_table_and_plain_rows_keep_current_behavior(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state, unit, line = workspace.proof_states[0], workspace.proof_states[0].text_units[0], workspace.proof_states[0].lines[0]
+
+    table_atoms = (_inline_atom(line, "atom-t", 0, "a|b", (0, 3), "table", (10, 10, 70, 30)),)
+    table_panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text="a|b", line_kind="table", atoms=table_atoms))
     table_widget = table_panel._row_widgets[("proof-1", "unit-1")]
     assert table_widget.row.kind == "table"
     assert not table_widget._line_crop.isNull()
-    assert table_widget._preview_button.isVisible() is False
+    assert table_widget._formula_render_area.isHidden()
     table_panel.close()
 
-    plain_panel = HProofPanel(workspace_with_text(r"$a|b$"))
+    plain_panel = HProofPanel(build_proof_workspace_view(session))
     plain_widget = plain_panel._row_widgets[("proof-1", "unit-1")]
     assert plain_widget.row.kind == "text"
-    assert plain_widget._preview_button.isVisible() is False
+    assert plain_widget._formula_render_area.isHidden()
     plain_panel.close()
 
 
