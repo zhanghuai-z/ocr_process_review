@@ -24,6 +24,7 @@ def current_ocr_observation(
     try:
         page = session.page_repository.get(page_uid)
         layout = session.layout_repository.get(page_uid)
+        artifact = session.paddle_artifact_repository.get(layout.artifact_uid)
         pointer = session.ocr_observation_repository.get_active_pointer(page_uid)
         batch = session.ocr_observation_repository.get_batch(
             pointer.batch_uid,
@@ -32,10 +33,9 @@ def current_ocr_observation(
         run = session.ocr_observation_repository.get_run(batch.run_uid)
     except RecordNotFoundError:
         return None
-    metadata = dict(run.metadata)
     if batch.layout_fingerprint != layout_snapshot_fingerprint(layout):
         return None
-    if metadata.get("page_fingerprint") != page.fingerprint:
+    if artifact.page_uid != page.uid or artifact.image_hash != page.image_hash:
         return None
     return CurrentOcrObservation(pointer=pointer, run=run, batch=batch)
 

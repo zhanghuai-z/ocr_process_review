@@ -17,6 +17,7 @@ from app.core.workflow_state import (
     pending_ocr_page_uids,
 )
 from app.models.layout_snapshot import LayoutSnapshot
+from app.models.paddle_artifact import PaddleArtifact
 from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
 from app.services import ImportService
 from app.ui.main_window import MainWindow, _ShellProgress
@@ -43,6 +44,31 @@ def _page(session: ProjectSession) -> PageRecord:
     return record
 
 
+def _layout(session: ProjectSession, page: PageRecord) -> None:
+    artifact = session.paddle_artifact_repository.append(
+        PaddleArtifact(
+            project_uid=session.project_uid,
+            uid="artifact-1",
+            page_uid=page.uid,
+            source_engine="test",
+            source_run_id="layout-run",
+            image_hash=page.image_hash,
+            payload_json="{}",
+        )
+    )
+    session.layout_repository.put(
+        LayoutSnapshot(
+            page_uid=page.uid,
+            revision=1,
+            artifact_uid=artifact.uid,
+            source_engine="test",
+            source_run_id="layout-run",
+            blocks=(),
+        ),
+        expected_revision=0,
+    )
+
+
 def test_workflow_state_uses_adopted_session_facts() -> None:
     session = ProjectSession(ProjectRecord("project-1", "Book"))
     page = _page(session)
@@ -52,17 +78,7 @@ def test_workflow_state_uses_adopted_session_facts() -> None:
     assert gate.reason_code == "layout_not_done"
     assert pending_ocr_page_uids(session) == ()
 
-    session.layout_repository.put(
-        LayoutSnapshot(
-            page_uid=page.uid,
-            revision=1,
-            artifact_uid="",
-            source_engine="test",
-            source_run_id="layout-run",
-            blocks=(),
-        ),
-        expected_revision=0,
-    )
+    _layout(session, page)
 
     assert compute_max_step(session) == STEP_OCR
     assert pending_ocr_page_uids(session) == (page.uid,)
@@ -139,17 +155,7 @@ def test_main_window_keeps_ocr_stage_on_layout_workbench(tmp_path: Path) -> None
     app = QApplication.instance() or QApplication([])
     session = ProjectSession(ProjectRecord("project-1", "Book"))
     page = _page(session)
-    session.layout_repository.put(
-        LayoutSnapshot(
-            page_uid=page.uid,
-            revision=1,
-            artifact_uid="",
-            source_engine="test",
-            source_run_id="layout-run",
-            blocks=(),
-        ),
-        expected_revision=0,
-    )
+    _layout(session, page)
     controller = WorkflowController(
         application=WorkbenchApplication(session=session, import_service=ImportService())
     )

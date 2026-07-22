@@ -451,6 +451,12 @@ def _render_svg_pixmap(
         renderer.render(painter, QRectF(0, 0, physical_width, physical_height))
     finally:
         painter.end()
+    image = _trim_transparent_image(image)
+    if image.height() != physical_height:
+        image = image.scaledToHeight(
+            physical_height,
+            Qt.TransformationMode.SmoothTransformation,
+        )
     pixmap = QPixmap.fromImage(image)
     if pixmap.isNull():
         raise RuntimeError("empty formula pixmap")
@@ -458,6 +464,26 @@ def _render_svg_pixmap(
     logical_width = max(1, int(round(pixmap.width() / dpr)))
     logical_height = max(1, int(round(pixmap.height() / dpr)))
     return pixmap, logical_width, logical_height
+
+
+def _trim_transparent_image(image: QImage) -> QImage:
+    """Remove renderer canvas padding while preserving every painted pixel."""
+
+    rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    buffer = rgba.bits()
+    pixels = np.frombuffer(buffer, dtype=np.uint8).reshape(
+        rgba.height(), rgba.bytesPerLine() // 4, 4
+    )[:, : rgba.width(), :]
+    visible = pixels[:, :, 3] > 0
+    if not np.any(visible):
+        return image
+    rows = np.where(np.any(visible, axis=1))[0]
+    cols = np.where(np.any(visible, axis=0))[0]
+    left = int(cols[0])
+    top = int(rows[0])
+    right = int(cols[-1]) + 1
+    bottom = int(rows[-1]) + 1
+    return rgba.copy(left, top, right - left, bottom - top)
 
 
 def _svg_viewbox_aspect_ratio(svg: bytes) -> float:

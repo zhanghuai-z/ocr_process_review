@@ -23,6 +23,7 @@ from app.models.ocr_records import (
     OcrRegion,
     OcrRun,
 )
+from app.models.paddle_artifact import PaddleArtifact
 from app.models.proof_records import (
     ProofAlignmentSegment,
     ProofAlignmentSlice,
@@ -82,6 +83,17 @@ def _session(tmp_path: Path) -> tuple[ProjectSession, ProofSessionService]:
             source_engine="test",
             source_run_id="layout-run-1",
             blocks=(),
+    )
+    session.paddle_artifact_repository.append(
+        PaddleArtifact(
+            project_uid=project_uid,
+            uid="layout-1",
+            page_uid="page-1",
+            source_engine="test",
+            source_run_id="layout-run-1",
+            image_hash="page-hash",
+            payload_json="{}",
+        )
     )
     session.layout_repository.put(layout, expected_revision=0)
     page = session.page_repository.get("page-1")
@@ -638,9 +650,17 @@ def test_formula_number_link_is_soft_and_hproof_groups_its_visuals(qapp, tmp_pat
     widget = panel._row_widgets[("proof-1", "unit-1")]
     assert widget.row.formula_number_line == number_line
     assert widget._line_bbox == (10, 10, 120, 30)
-    assert widget._formula_render_label.text() == r"render:E=mc^2 \tag{2}"
+    assert widget._formula_render_label.text() == r"render:E=mc^2 \qquad (2)"
     assert widget.editor.toPlainText() == formula_text
     panel.close()
+
+
+def test_formula_preview_replaces_source_tag_with_linked_number() -> None:
+    from app.ui.proof.h_proof import _formula_preview_source
+
+    assert _formula_preview_source(r"$$x^2 \tag{old}$$", "（7）") == (
+        r"x^2 \qquad (7)"
+    )
 
 
 def test_hproof_recreates_editor_when_row_kind_changes(qapp, tmp_path) -> None:

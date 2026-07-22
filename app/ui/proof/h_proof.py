@@ -378,7 +378,7 @@ def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual |
 
 
 def _formula_preview_source(source: str, number_text: str = "") -> str:
-    """Compose a render-only formula tag without changing either proof unit."""
+    """Compose the linked number into a render-only formula preview."""
 
     body = (source or "").strip()
     number = (number_text or "").strip().strip("$ ")
@@ -386,11 +386,12 @@ def _formula_preview_source(source: str, number_text: str = "") -> str:
         ("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"),
     }:
         number = number[1:-1].strip()
-    if not body or not number or r"\tag{" in body:
+    if not body or not number:
         return body
     body = re.sub(r"^\s*\$\$?\s*", "", body)
     body = re.sub(r"\s*\$\$?\s*$", "", body)
-    return rf"{body.strip()} \tag{{{number}}}"
+    body = re.sub(r"\\tag\*?\s*\{[^{}]*\}", "", body)
+    return rf"{body.strip()} \qquad ({number})"
 
 
 @dataclass(frozen=True, slots=True)

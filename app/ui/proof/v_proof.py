@@ -113,21 +113,42 @@ def _page_pixmap(
         return QPixmap()
     reader = QImageReader(page.image_path)
     source_size = reader.size()
-    if source_size.width() <= 0 or page.width <= 0 or page.height <= 0:
+    if (
+        source_size.width() <= 0
+        or source_size.height() <= 0
+        or page.width <= 0
+        or page.height <= 0
+    ):
         return QPixmap()
-    if source_size.width() > 2400:
-        reader.setScaledSize(
-            QSize(2400, round(source_size.height() * 2400 / source_size.width()))
-        )
+    left, top, right, bottom = bbox
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(page.width, right + pad)
+    bottom = min(page.height, bottom + pad)
+    if right <= left or bottom <= top:
+        return QPixmap()
+    x_scale = source_size.width() / page.width
+    y_scale = source_size.height() / page.height
+    source_rect = QRect(
+        max(0, round(left * x_scale)),
+        max(0, round(top * y_scale)),
+        max(1, round((right - left) * x_scale)),
+        max(1, round((bottom - top) * y_scale)),
+    ).intersected(QRect(0, 0, source_size.width(), source_size.height()))
+    if source_rect.isEmpty():
+        return QPixmap()
+    # Decode the original-resolution bbox before scaling.  Downscaling a full
+    # 600-DPI page first collapses punctuation into two or three pixels.
+    reader.setClipRect(source_rect)
     image = reader.read()
     if image.isNull():
         return QPixmap()
-    return _crop_page_pixmap(
-        page,
-        QPixmap.fromImage(image),
-        bbox,
-        target_size,
-        pad=pad,
+    target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
+    return QPixmap.fromImage(image).scaled(
+        max(1, target.width()),
+        max(1, target.height()),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
     )
 
 
@@ -788,9 +809,8 @@ class VProofPanel(QWidget):
         canvas = QPixmap(cell, cell)
         canvas.fill(QColor("#FFFDF8"))
         painter = QPainter(canvas)
-        crop = _crop_page_pixmap(
+        crop = _page_pixmap(
             page,
-            self._page_source_pixmap(page),
             entry.bbox,
             QSize(cell - 16, cell - 16),
             pad=_gallery_crop_pad(entry),
