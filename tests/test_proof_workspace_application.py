@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 
 import pytest
 
@@ -196,6 +196,8 @@ def _session(
         project_uid=PROJECT_UID,
         uid="segment-1",
         anchor_uid=anchor.uid,
+        text_unit_uid="unit-1",
+        source_line_uids=("line-1",),
         source_start=0,
         source_end=source_end,
         proof_start=0,
@@ -489,3 +491,29 @@ def test_query_does_not_reuse_old_line_or_atom_when_active_observation_changes()
     assert line_view.line_uid is None
     assert line_view.ocr_text == ""
     assert line_view.atoms == ()
+
+
+def test_line_view_keeps_formula_image_geometry_without_character_index_entries() -> None:
+    from app.application.proof_workspace import _line_view
+
+    session, state, batch, _pointer = _session()
+    ocr = session.ocr_observation_repository
+    line = ocr.get_line("line-1")
+    atoms = {uid: ocr.get_atom(uid) for uid in batch.atom_uids}
+    formula_region = replace(ocr.get_region("region-1"), kind="formula")
+
+    view = _line_view(
+        state=state,
+        unit=state.text_units[0],
+        batch=batch,
+        page=session.page_repository.get("page-1"),
+        lines_by_uid={line.uid: line},
+        atoms_by_uid=atoms,
+        regions_by_uid={formula_region.uid: formula_region},
+        entries=(),
+    )
+
+    assert view.render_kind == "formula"
+    assert view.line_uid == line.uid
+    assert view.bbox == line.bbox
+    assert tuple(atom.atom_uid for atom in view.atoms) == line.atom_uids

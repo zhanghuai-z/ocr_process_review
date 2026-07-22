@@ -111,6 +111,8 @@ class ProofAlignmentSegment:
     project_uid: str
     uid: str
     anchor_uid: str
+    text_unit_uid: str
+    source_line_uids: tuple[str, ...]
     source_start: int
     source_end: int
     proof_start: int
@@ -124,6 +126,15 @@ class ProofAlignmentSegment:
         _required_uid(self.project_uid, "project_uid")
         _required_uid(self.uid, "uid")
         _required_uid(self.anchor_uid, "anchor_uid")
+        _required_uid(self.text_unit_uid, "text_unit_uid")
+        source_line_uids = tuple(
+            _required_uid(item, "source_line_uid") for item in self.source_line_uids
+        )
+        if not source_line_uids:
+            raise ValueError("source_line_uids must contain at least one OCR line UID")
+        if len(set(source_line_uids)) != len(source_line_uids):
+            raise ValueError("source_line_uids contain duplicate UIDs")
+        object.__setattr__(self, "source_line_uids", source_line_uids)
         source_start = _range(self.source_start, "source_start")
         source_end = _range(self.source_end, "source_end")
         proof_start = _range(self.proof_start, "proof_start")
@@ -239,6 +250,7 @@ class ProofState:
         if len({item.uid for item in slices}) != len(slices):
             raise ValueError("alignment_slices contain duplicate UIDs")
         segment_uids = {item.uid for item in segments}
+        text_unit_uids = {item.uid for item in text_units}
         for item in text_units:
             if item.project_uid != self.project_uid:
                 raise ValueError("proof text unit belongs to another project")
@@ -247,6 +259,11 @@ class ProofState:
                 raise ValueError("alignment segment belongs to another project")
             if segment.anchor_uid != self.anchor_snapshot.uid:
                 raise ValueError("alignment segment is bound to another anchor")
+            if segment.text_unit_uid not in text_unit_uids:
+                raise ValueError("alignment segment references an unknown text unit")
+        aligned_unit_uids = [segment.text_unit_uid for segment in segments]
+        if len(set(aligned_unit_uids)) != len(aligned_unit_uids):
+            raise ValueError("multiple alignment segments reference one text unit")
         for item in slices:
             if item.project_uid != self.project_uid:
                 raise ValueError("alignment slice belongs to another project")

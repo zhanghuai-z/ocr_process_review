@@ -91,7 +91,7 @@ def _entry_key(entry: ProofCharView) -> tuple[str, str, int, str | None]:
 
 
 def _gallery_crop_pad(entry: ProofCharView) -> int:
-    """Crop padding (source pixels) for one gallery thumbnail.
+    """Crop padding in page coordinates for one gallery thumbnail.
 
     CJK glyphs keep a small adaptive margin so strokes never touch the cell
     edge; latin/digit boxes are tight by construction and only get a 1px
@@ -116,13 +116,7 @@ def _page_pixmap(
     *,
     pad: int = 0,
 ) -> QPixmap:
-    """Return a character crop, never a full-page decode.
-
-    ``QImageReader.setClipRect`` decodes only the crop region at native
-    resolution; scaling to the target size then uses smooth resampling, so
-    gallery icons for a common character never force dozens of 600 DPI
-    full-page decodes.  ``pad`` expands the crop rect in source pixels.
-    """
+    """Return a crop through the same scaled-page transform as the viewer."""
 
     if bbox is None:
         return QPixmap()
@@ -130,28 +124,51 @@ def _page_pixmap(
     source_size = reader.size()
     if source_size.width() <= 0 or page.width <= 0 or page.height <= 0:
         return QPixmap()
+    if source_size.width() > 2400:
+        reader.setScaledSize(
+            QSize(2400, round(source_size.height() * 2400 / source_size.width()))
+        )
+    image = reader.read()
+    if image.isNull():
+        return QPixmap()
+    return _crop_page_pixmap(
+        page,
+        QPixmap.fromImage(image),
+        bbox,
+        target_size,
+        pad=pad,
+    )
+
+
+def _crop_page_pixmap(
+    page: ProofPageView,
+    page_pixmap: QPixmap,
+    bbox: tuple[int, int, int, int] | None,
+    target_size: QSize | None = None,
+    *,
+    pad: int = 0,
+) -> QPixmap:
+    """Crop one bbox from a page pixmap using page-coordinate geometry."""
+
+    if bbox is None or page_pixmap.isNull() or page.width <= 0 or page.height <= 0:
+        return QPixmap()
     left, top, right, bottom = bbox
-    x_scale = source_size.width() / page.width
-    y_scale = source_size.height() / page.height
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(page.width, right + pad)
+    bottom = min(page.height, bottom + pad)
+    x_scale = page_pixmap.width() / page.width
+    y_scale = page_pixmap.height() / page.height
     crop_rect = QRect(
         round(left * x_scale),
         round(top * y_scale),
         max(1, round((right - left) * x_scale)),
         max(1, round((bottom - top) * y_scale)),
-    )
-    if pad > 0:
-        crop_rect = crop_rect.adjusted(-pad, -pad, pad, pad)
-    crop_rect = crop_rect.intersected(
-        QRect(0, 0, source_size.width(), source_size.height())
-    )
+    ).intersected(page_pixmap.rect())
     if crop_rect.isEmpty():
         return QPixmap()
-    reader.setClipRect(crop_rect)
-    image = reader.read()
-    if image.isNull():
-        return QPixmap()
     target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
-    return QPixmap.fromImage(image).scaled(
+    return page_pixmap.copy(crop_rect).scaled(
         max(1, target.width()),
         max(1, target.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
@@ -780,8 +797,9 @@ class VProofPanel(QWidget):
         canvas = QPixmap(cell, cell)
         canvas.fill(QColor("#FFFDF8"))
         painter = QPainter(canvas)
-        crop = _page_pixmap(
+        crop = _crop_page_pixmap(
             page,
+            self._page_source_pixmap(page),
             entry.bbox,
             QSize(cell - 16, cell - 16),
             pad=_gallery_crop_pad(entry),
@@ -1080,47 +1098,42 @@ class VProofPanel(QWidget):
 
     # ─────────────────── rendering ───────────────────
 
-    def _paragraph_context(
+    def _page_context(
         self,
         entry: ProofCharView,
         line: ProofLineView,
     ) -> tuple[str, int]:
-        """Full paragraph (same layout region) proof text + char offset.
-
-        纵校以字符为单位，但人工判断对错需要段落语境：把同一版面 region
-        的各行校对文本拼成整段，返回字符在段落中的偏移。
-        """
+        """Full page proof text grouped by layout region + char offset."""
 
         own_unit = self._units.get((entry.proof_uid, entry.text_unit_uid))
         if own_unit is None:
             return "-", 0
-        region_ids = set(line.region_uids)
-        if line.region_uid:
-            region_ids.add(line.region_uid)
-        if not region_ids:
-            return own_unit.text or "-", entry.char_index
-        peers: list[tuple[int, str, str]] = []
+        peers: list[tuple[int, str, str, tuple[str, ...]]] = []
         for peer_line in self._lines.values():
             if peer_line.proof_uid != line.proof_uid:
                 continue
-            peer_regions = set(peer_line.region_uids)
-            if peer_line.region_uid:
-                peer_regions.add(peer_line.region_uid)
-            if not (region_ids & peer_regions):
-                continue
             unit = self._units.get((peer_line.proof_uid, peer_line.text_unit_uid))
             if unit is not None:
-                peers.append((peer_line.order, peer_line.text_unit_uid, unit.text))
+                region_uids = peer_line.region_uids or (
+                    (peer_line.region_uid,) if peer_line.region_uid else ()
+                )
+                peers.append(
+                    (peer_line.order, peer_line.text_unit_uid, unit.text, region_uids)
+                )
         peers.sort(key=lambda item: (item[0], item[1]))
-        parts: list[str] = []
+        text = ""
         offset = 0
-        for _order, text_unit_uid, text in peers:
+        previous_regions: tuple[str, ...] | None = None
+        for _order, text_unit_uid, unit_text, region_uids in peers:
+            if text:
+                text += "\n" if region_uids == previous_regions else "\n\n"
             if text_unit_uid == entry.text_unit_uid:
-                offset = sum(len(part) + 1 for part in parts)
-            parts.append(text)
-        if not parts:
+                offset = len(text)
+            text += unit_text
+            previous_regions = region_uids
+        if not text:
             return own_unit.text or "-", entry.char_index
-        return "\n".join(parts), offset + entry.char_index
+        return text, offset + entry.char_index
 
     def _render_entry(self, entry: ProofCharView | None) -> None:
         if entry is None:
@@ -1135,8 +1148,8 @@ class VProofPanel(QWidget):
         if page is None or unit is None or line is None:
             self._render_entry(None)
             return
-        # 上下文为整段校对文本（同版面 region），按段落偏移高亮对应字
-        context_text, highlight_offset = self._paragraph_context(entry, line)
+        # 页面只做弱聚合：全文按版面段落分隔，当前字符仍由稳定索引定位。
+        context_text, highlight_offset = self._page_context(entry, line)
         self._ocr_context.setPlainText(context_text)
         self._ocr_context.setExtraSelections([])
         if 0 <= highlight_offset < len(context_text):

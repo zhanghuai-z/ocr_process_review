@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,10 @@ def test_vproof_uses_character_crops_and_highlights_one_ocr_occurrence(
     assert crop_b.size() == QSize(200, 200)
     assert crop_b.toImage().pixelColor(100, 100).green() > 100
     assert _page_pixmap(page, None, QSize(200, 200)).isNull()
+    icon_a = panel._entry_icon(entry_a).pixmap(QSize(56, 56)).toImage()
+    icon_b = panel._entry_icon(entry_b).pixmap(QSize(56, 56)).toImage()
+    assert icon_a.pixelColor(28, 28).red() > 180
+    assert icon_b.pixelColor(28, 28).green() > 100
 
     panel._set_gallery((entry_a,))
     qapp.processEvents()
@@ -196,4 +201,53 @@ def test_vproof_uses_character_crops_and_highlights_one_ocr_occurrence(
     assert commands[0].op == "replace_many"
     assert commands[0].proof_uid == "proof-1"
     assert commands[0].replacements == (("unit-1", "ax"),)
+    panel.close()
+
+
+def test_vproof_page_context_aggregates_regions_without_changing_char_identity(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.v_proof import VProofPanel
+
+    workspace = _workspace(tmp_path)
+    state = workspace.proof_states[0]
+    first_line = state.lines[0]
+    second_unit = replace(
+        state.text_units[0],
+        text_unit_uid="unit-2",
+        order=1,
+        text="cd",
+        fingerprint="unit-fingerprint-2",
+    )
+    second_line = replace(
+        first_line,
+        line_uid="line-2",
+        region_uid="region-2",
+        line_uids=("line-2",),
+        region_uids=("region-2",),
+        text_unit_uid="unit-2",
+        order=1,
+        ocr_text="cd",
+        proof_text="cd",
+        atoms=(),
+        text_unit_fingerprint=second_unit.fingerprint,
+    )
+    next_state = replace(
+        state,
+        text_units=(state.text_units[0], second_unit),
+        lines=(first_line, second_line),
+    )
+    panel = VProofPanel(
+        replace(
+            workspace,
+            proof_states=(next_state,),
+            lines=(first_line, second_line),
+        )
+    )
+
+    assert panel._ocr_context.toPlainText() == "ab\n\ncd"
+    assert panel._selected_entry is not None
+    assert panel._selected_entry.text_unit_uid == "unit-1"
+    assert panel._ocr_context.extraSelections()[0].cursor.selectedText() == "a"
     panel.close()

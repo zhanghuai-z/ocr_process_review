@@ -477,7 +477,21 @@ def _line_view(
     regions_by_uid: dict[str, OcrRegion],
     entries: tuple[CharIndexEntry, ...],
 ) -> ProofLineView:
-    mapped_line_uids = _unique(item.line_uid for item in entries if item.line_uid)
+    segments = tuple(
+        item for item in state.alignment_segments if item.text_unit_uid == unit.uid
+    )
+    if len(segments) > 1:
+        raise ValueError(f"proof unit {unit.uid!r} has multiple alignment segments")
+    mapped_line_uids = segments[0].source_line_uids if segments else ()
+    unknown_line_uids = set(mapped_line_uids) - set(lines_by_uid)
+    if unknown_line_uids:
+        if state.anchor_snapshot.source_fingerprint != batch.fingerprint:
+            mapped_line_uids = ()
+        else:
+            raise ValueError(
+                f"proof unit {unit.uid!r} references OCR lines outside the active batch: "
+                f"{sorted(unknown_line_uids)!r}"
+            )
     mapped_lines = tuple(
         sorted(
             (lines_by_uid[uid] for uid in mapped_line_uids),

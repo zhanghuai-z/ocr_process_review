@@ -527,6 +527,8 @@ def _initial_proof_state(
             project_uid=project_uid,
             uid=segment_uid,
             anchor_uid=anchor_uid,
+            text_unit_uid=unit_uid,
+            source_line_uids=(line.uid,),
             source_start=source_cursor,
             source_end=source_end,
             proof_start=proof_cursor,

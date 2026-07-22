@@ -179,6 +179,8 @@ def _session() -> tuple[ProjectSession, ProofState]:
         project_uid=project_uid,
         uid="segment-1",
         anchor_uid=anchor.uid,
+        text_unit_uid="unit-1",
+        source_line_uids=("line-1",),
         source_start=0,
         source_end=2,
         proof_start=0,

@@ -71,7 +71,7 @@ from app.application.proof_workspace import (
     ProofWorkspaceView,
 )
 from app.ui.proof import char_verdict as _cv
-from app.ui.proof.confidence_view import ProofCharView, normalize_confidence
+from app.ui.proof.confidence_view import ProofCharView, build_char_views, normalize_confidence
 from app.ui.proof.formula_renderer import render_formula_pixmap
 from app.ui.widgets.page_thumbnail import PAGE_ROW_H, PageDirectoryRow
 
@@ -399,53 +399,6 @@ def _atom_placements(line: ProofLineView) -> tuple[_AtomPlacement, ...]:
             )
         placements.append(_AtomPlacement(atom=atom, char_indices=char_indices))
     return tuple(placements)
-
-
-def _char_views(
-    line: ProofLineView,
-    page: ProofPageView,
-) -> tuple[ProofCharView, ...]:
-    """Map each proof character to its immutable atom geometry when available."""
-
-    if line.page_uid != page.page_uid:
-        raise ValueError("line and page views must reference the same page UID")
-    placements = _atom_placements(line)
-    by_char_index: dict[int, tuple[_AtomPlacement, int]] = {}
-    for placement in placements:
-        for offset, char_index in enumerate(placement.char_indices):
-            if char_index in by_char_index:
-                raise ValueError(f"proof character index {char_index} maps to multiple atoms")
-            by_char_index[char_index] = (placement, offset)
-    result: list[ProofCharView] = []
-    for char_index, text_char in enumerate(line.proof_text):
-        mapped = by_char_index.get(char_index)
-        placement, offset = mapped if mapped is not None else (None, -1)
-        atom = placement.atom if placement is not None else None
-        ocr_char = (
-            atom.text[offset]
-            if atom is not None and 0 <= offset < len(atom.text)
-            else None
-        )
-        result.append(
-            ProofCharView(
-                proof_uid=line.proof_uid,
-                text_unit_uid=line.text_unit_uid,
-                char_index=char_index,
-                text=text_char,
-                page_uid=page.page_uid,
-                page_number=page.page_number,
-                image_path=page.image_path,
-                line_uid=atom.line_uid if atom is not None else line.line_uid,
-                region_uid=atom.region_uid if atom is not None else line.region_uid,
-                atom_uid=atom.atom_uid if atom is not None else None,
-                atom_index=atom.atom_index if atom is not None else None,
-                bbox=atom.bbox if atom is not None else None,
-                confidence=normalize_confidence(atom.confidence) if atom is not None else None,
-                ocr_char=ocr_char,
-                available=atom is not None,
-            )
-        )
-    return tuple(result)
 
 
 def _row_kind(line: ProofLineView, placements: tuple[_AtomPlacement, ...]) -> str:
@@ -2340,7 +2293,7 @@ class HProofPanel(QWidget):
                         state=state,
                         unit=unit,
                         line=line,
-                        entries=_char_views(line, page),
+                        entries=build_char_views(line, page),
                         atom_placements=atom_placements,
                         kind=kind,
                         preview_source=_row_preview_source(line, atom_placements, kind),
