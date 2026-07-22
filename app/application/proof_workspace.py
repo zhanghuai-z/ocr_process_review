@@ -179,6 +179,7 @@ class ProofLineView:
     state_fingerprint: str
     text_unit_revision: int
     text_unit_fingerprint: str
+    region_kinds: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _uid(self.proof_uid, "proof_uid")
@@ -204,6 +205,11 @@ class ProofLineView:
         object.__setattr__(self, "line_uids", line_uids)
         object.__setattr__(self, "region_uids", region_uids)
         object.__setattr__(self, "atoms", atoms)
+        object.__setattr__(
+            self,
+            "region_kinds",
+            tuple(normalize_paddle_label(item) for item in self.region_kinds),
+        )
         if self.confidence is not None:
             if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
                 raise TypeError("confidence must be a number or None")
@@ -282,6 +288,28 @@ class ProofStateView:
 
 
 @dataclass(frozen=True, slots=True)
+class FormulaNumberLinkView:
+    """Discardable presentation link between a display formula and its number.
+
+    Both text units remain independent OCR/proof facts.  Consumers may use the
+    link to present them together, or ignore it without losing either fact.
+    """
+
+    proof_uid: str
+    page_uid: str
+    formula_text_unit_uid: str
+    number_text_unit_uid: str
+
+    def __post_init__(self) -> None:
+        _uid(self.proof_uid, "proof_uid")
+        _uid(self.page_uid, "page_uid")
+        _uid(self.formula_text_unit_uid, "formula_text_unit_uid")
+        _uid(self.number_text_unit_uid, "number_text_unit_uid")
+        if self.formula_text_unit_uid == self.number_text_unit_uid:
+            raise ValueError("formula number link requires two distinct text units")
+
+
+@dataclass(frozen=True, slots=True)
 class ProofWorkspaceView:
     """Complete read-only proof query result for one project session."""
 
@@ -289,21 +317,39 @@ class ProofWorkspaceView:
     pages: tuple[ProofPageView, ...]
     proof_states: tuple[ProofStateView, ...]
     lines: tuple[ProofLineView, ...]
+    formula_number_links: tuple[FormulaNumberLinkView, ...] = ()
 
     def __post_init__(self) -> None:
         _uid(self.project_uid, "project_uid")
         pages = tuple(self.pages)
         proof_states = tuple(self.proof_states)
         lines = tuple(self.lines)
+        formula_number_links = tuple(self.formula_number_links)
         if any(not isinstance(item, ProofPageView) for item in pages):
             raise TypeError("pages must contain ProofPageView values")
         if any(not isinstance(item, ProofStateView) for item in proof_states):
             raise TypeError("proof_states must contain ProofStateView values")
         if any(not isinstance(item, ProofLineView) for item in lines):
             raise TypeError("lines must contain ProofLineView values")
+        if any(not isinstance(item, FormulaNumberLinkView) for item in formula_number_links):
+            raise TypeError("formula_number_links must contain FormulaNumberLinkView values")
+        states_by_uid = {state.proof_uid: state for state in proof_states}
+        for link in formula_number_links:
+            state = states_by_uid.get(link.proof_uid)
+            if state is None:
+                raise ValueError("formula number link belongs to an unknown proof state")
+            if link.page_uid != state.page_uid:
+                raise ValueError("formula number link page does not match its proof state")
+            unit_uids = set(state.text_unit_uids)
+            if {
+                link.formula_text_unit_uid,
+                link.number_text_unit_uid,
+            } - unit_uids:
+                raise ValueError("formula number link references an unknown text unit")
         object.__setattr__(self, "pages", pages)
         object.__setattr__(self, "proof_states", proof_states)
         object.__setattr__(self, "lines", lines)
+        object.__setattr__(self, "formula_number_links", formula_number_links)
 
     @property
     def states(self) -> tuple[ProofStateView, ...]:
@@ -408,6 +454,14 @@ _FORMULA_REGION_KINDS = frozenset({
     "inline_formula",
     "isolated_formula",
 })
+_DISPLAY_FORMULA_REGION_KINDS = frozenset({
+    "display_equation",
+    "display_formula",
+    "equation",
+    "equation_block",
+    "isolated_formula",
+})
+_FORMULA_NUMBER_REGION_KINDS = frozenset({"equation_number", "formula_number"})
 _TABLE_REGION_KINDS = frozenset({
     "table",
     "table_block",
@@ -564,7 +618,52 @@ def _line_view(
         state_fingerprint=state.fingerprint,
         text_unit_revision=unit.revision,
         text_unit_fingerprint=unit.fingerprint,
+        region_kinds=region_kinds,
     )
+
+
+def _formula_number_links(state: ProofStateView) -> tuple[FormulaNumberLinkView, ...]:
+    """Associate only unambiguous, same-row formula-number observations."""
+
+    formulas = tuple(
+        line
+        for line in state.lines
+        if set(line.region_kinds) & _DISPLAY_FORMULA_REGION_KINDS
+        and line.bbox is not None
+    )
+    numbers = tuple(
+        line
+        for line in state.lines
+        if set(line.region_kinds) & _FORMULA_NUMBER_REGION_KINDS
+        and line.bbox is not None
+    )
+    links: list[FormulaNumberLinkView] = []
+    claimed_formula_uids: set[str] = set()
+    for number in numbers:
+        assert number.bbox is not None
+        number_center_x = (number.bbox[0] + number.bbox[2]) / 2.0
+        candidates = []
+        for formula in formulas:
+            assert formula.bbox is not None
+            formula_center_x = (formula.bbox[0] + formula.bbox[2]) / 2.0
+            vertical_overlap = min(formula.bbox[3], number.bbox[3]) - max(
+                formula.bbox[1], number.bbox[1]
+            )
+            if vertical_overlap > 0 and number_center_x > formula_center_x:
+                candidates.append(formula)
+        if len(candidates) != 1:
+            continue
+        formula = candidates[0]
+        if formula.text_unit_uid in claimed_formula_uids:
+            continue
+        claimed_formula_uids.add(formula.text_unit_uid)
+        links.append(FormulaNumberLinkView(
+            proof_uid=state.proof_uid,
+            page_uid=state.page_uid,
+            formula_text_unit_uid=formula.text_unit_uid,
+            number_text_unit_uid=number.text_unit_uid,
+        ))
+    return tuple(links)
 
 
 def _state_view(
@@ -679,11 +778,15 @@ def build_proof_workspace_view(
         )) is not None
     )
     lines = tuple(line for state in state_views for line in state.lines)
+    formula_number_links = tuple(
+        link for state in state_views for link in _formula_number_links(state)
+    )
     return ProofWorkspaceView(
         project_uid=session.project_uid,
         pages=tuple(_page_view(page) for page in pages),
         proof_states=state_views,
         lines=lines,
+        formula_number_links=formula_number_links,
     )
 
 
@@ -728,6 +831,7 @@ class ProofWorkspaceQuery:
 
 
 __all__ = [
+    "FormulaNumberLinkView",
     "ProofAtomView",
     "ProofLineView",
     "ProofPageView",

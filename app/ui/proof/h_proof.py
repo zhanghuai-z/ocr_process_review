@@ -128,7 +128,12 @@ FAR_LINE_PAIR_MIN_H = 48
 FAR_LINE_PAIR_MAX_H = 54
 FOCUS_OPACITY = {"active": 1.0, "near": 0.45, "far": 0.30}
 
-FORMULA_VISUAL_HEIGHT_RATIO = 0.70
+FORMULA_SCALE = 1.40
+FORMULA_IMAGE_ROW_H = round(IMAGE_ROW_H * FORMULA_SCALE)
+FORMULA_RENDER_TARGET_H = 56
+FORMULA_RENDER_AREA_H = 72
+FORMULA_SOURCE_PANEL_H = 82
+FORMULA_VISUAL_HEIGHT_RATIO = 0.98
 FORMULA_SOURCE_POPUP_OFFSET = QPoint(10, 18)
 TABLE_ROW_IMAGE_H = 200
 TABLE_LINE_PAIR_MIN_H = 268
@@ -372,6 +377,22 @@ def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual |
     return None
 
 
+def _formula_preview_source(source: str, number_text: str = "") -> str:
+    """Compose a render-only formula tag without changing either proof unit."""
+
+    body = (source or "").strip()
+    number = (number_text or "").strip().strip("$ ")
+    if len(number) >= 2 and (number[0], number[-1]) in {
+        ("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"),
+    }:
+        number = number[1:-1].strip()
+    if not body or not number or r"\tag{" in body:
+        return body
+    body = re.sub(r"^\s*\$\$?\s*", "", body)
+    body = re.sub(r"\s*\$\$?\s*$", "", body)
+    return rf"{body.strip()} \tag{{{number}}}"
+
+
 @dataclass(frozen=True, slots=True)
 class _AtomPlacement:
     atom: ProofAtomView
@@ -449,10 +470,13 @@ def _row_preview_source(
 def _row_image_bbox(
     line: ProofLineView,
     placements: tuple[_AtomPlacement, ...],
+    formula_number_line: ProofLineView | None = None,
 ) -> tuple[int, int, int, int] | None:
     boxes = [item.atom.bbox for item in placements]
     if line.bbox is not None:
         boxes.insert(0, line.bbox)
+    if formula_number_line is not None and formula_number_line.bbox is not None:
+        boxes.append(formula_number_line.bbox)
     if not boxes:
         return None
     return (
@@ -474,6 +498,7 @@ class _ProofRow:
     atom_placements: tuple[_AtomPlacement, ...]
     kind: str
     preview_source: str
+    formula_number_line: ProofLineView | None = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1489,14 +1514,93 @@ class _FormulaSourcePopup(QFrame):
         self.closed.emit()
 
 
+class _FormulaSourceInlinePanel(QFrame):
+    """Full-width source editor used only for standalone formula rows."""
+
+    source_changed = Signal(str)
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("formulaSourceInlinePanel")
+        self.setFixedHeight(FORMULA_SOURCE_PANEL_H)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 5, 8, 6)
+        layout.setSpacing(4)
+        label = QLabel("公式源码")
+        label.setObjectName("formulaSourceLabel")
+        layout.addWidget(label)
+        self._source_edit = QPlainTextEdit()
+        self._source_edit.setObjectName("formulaSourceEdit")
+        self._source_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._source_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._source_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._source_edit.setFixedHeight(48)
+        self._source_edit.installEventFilter(self)
+        layout.addWidget(self._source_edit)
+        self._emit_timer = QTimer(self)
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.setInterval(160)
+        self._emit_timer.timeout.connect(self._emit_source_changed)
+        self._source_edit.textChanged.connect(self._emit_timer.start)
+        self.hide()
+
+    def open_for(self, source: str) -> None:
+        self._source_edit.blockSignals(True)
+        self._source_edit.setPlainText(source or "")
+        self._source_edit.blockSignals(False)
+        self.show()
+        self._source_edit.setFocus()
+        cursor = self._source_edit.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        self._source_edit.setTextCursor(cursor)
+
+    def _emit_source_changed(self) -> None:
+        self.source_changed.emit(
+            self._source_edit.toPlainText().replace("\r", "").replace("\n", " ").strip()
+        )
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._source_edit and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            if key == Qt.Key.Key_Escape or (ctrl and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}):
+                self.hide()
+                return True
+        return super().eventFilter(watched, event)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        if self._emit_timer.isActive():
+            self._emit_timer.stop()
+            self._emit_source_changed()
+        super().hideEvent(event)
+        self.closed.emit()
+
+
+class _FormulaRenderLabel(QLabel):
+    right_clicked = Signal(QPoint)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.RightButton:
+            self.right_clicked.emit(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class _ProofLineImage(QLabel):
     """Clickable image projection with no OCR ownership."""
 
     clicked = Signal(QPoint)
+    right_clicked = Signal(QPoint)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(event.position().toPoint())
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.right_clicked.emit(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
         super().mousePressEvent(event)
 
 
@@ -1609,6 +1713,7 @@ class _ProofRowWidget(QFrame):
         super().__init__(parent)
         self.row = row
         self._large_image = bool(large_image)
+        self._page_pixmap = page_pixmap
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(LINE_PAIR_MIN_H)
@@ -1635,23 +1740,30 @@ class _ProofRowWidget(QFrame):
 
         self._image = _ProofLineImage()
         self._image.setObjectName("proofLineImage")
-        self._image.setFixedHeight(TABLE_ROW_IMAGE_H if self._large_image else IMAGE_ROW_H)
+        self._image.setFixedHeight(
+            TABLE_ROW_IMAGE_H
+            if self._large_image
+            else (FORMULA_IMAGE_ROW_H if row.kind == "formula" else IMAGE_ROW_H)
+        )
         self._image.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._image.setText("无可用行图像")
-        self._line_bbox = _row_image_bbox(row.line, row.atom_placements)
+        self._line_bbox = _row_image_bbox(
+            row.line, row.atom_placements, row.formula_number_line
+        )
         self._line_crop = _image_for_row(row.page, self._line_bbox, page_pixmap)
         self._selected_char_index: int | None = None
         self._hover_char_index: int | None = None
         self._focus_depth = "far"
         self._displayed_pixmap_size = QSize()
         self._image.clicked.connect(self._on_image_clicked)
+        self._image.right_clicked.connect(self._open_standalone_formula_editor)
         content_layout.addWidget(self._image)
 
         # display formula 三行呈现：crop → 渲染 → 源码编辑
         self._formula_render_area = QScrollArea()
         self._formula_render_area.setObjectName("proofFormulaRender")
-        self._formula_render_area.setFixedHeight(56)
+        self._formula_render_area.setFixedHeight(FORMULA_RENDER_AREA_H)
         self._formula_render_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
@@ -1659,7 +1771,15 @@ class _ProofRowWidget(QFrame):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._formula_render_area.setFrameShape(QFrame.Shape.NoFrame)
-        self._formula_render_label = QLabel()
+        self._formula_render_area.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._formula_render_area.customContextMenuRequested.connect(
+            lambda pos: self._open_standalone_formula_editor(
+                self._formula_render_area.mapToGlobal(pos)
+            )
+        )
+        self._formula_render_label = _FormulaRenderLabel()
         self._formula_render_label.setObjectName("proofFormulaRenderLabel")
         self._formula_render_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -1673,6 +1793,11 @@ class _ProofRowWidget(QFrame):
         self._status_value = row.unit.status
         self._formula_source_range: tuple[int, int] | None = None
         self._formula_popup: _FormulaSourcePopup | None = None
+        self._formula_source_panel: _FormulaSourceInlinePanel | None = None
+        self._content_layout = content_layout
+        self._formula_render_label.right_clicked.connect(
+            self._open_standalone_formula_editor
+        )
         self._formula_render_timer = QTimer(self)
         self._formula_render_timer.setSingleShot(True)
         self._formula_render_timer.setInterval(160)
@@ -1728,8 +1853,17 @@ class _ProofRowWidget(QFrame):
         scroll position during a proofing session).
         """
 
+        previous_bbox = self._line_bbox
         self.row = row
         self._status_value = row.unit.status
+        self._line_bbox = _row_image_bbox(
+            row.line, row.atom_placements, row.formula_number_line
+        )
+        if self._line_bbox != previous_bbox:
+            self._line_crop = _image_for_row(
+                row.page, self._line_bbox, self._page_pixmap
+            )
+            self._refresh_image()
         self._refresh_status()
         self._refresh_formula_render()
         self._refresh_editor_geometry()
@@ -1877,17 +2011,26 @@ class _ProofRowWidget(QFrame):
         self._focus_depth = depth
         active = depth == "active"
         self.set_active(active)
-        self.editor.setVisible(active)
+        self.editor.setVisible(active and self.row.kind != "formula")
+        if not active and self._formula_source_panel is not None:
+            self._formula_source_panel.hide()
         self._image.setFixedHeight(
             TABLE_ROW_IMAGE_H
             if (active and self._large_image)
             else (
-                IMAGE_ROW_H
+                (FORMULA_IMAGE_ROW_H if self.row.kind == "formula" else IMAGE_ROW_H)
                 if active
                 else (NEAR_IMAGE_ROW_H if depth == "near" else FAR_IMAGE_ROW_H)
             )
         )
-        extra = 64 if (self.row.kind == "formula" and not self._large_image) else 0
+        extra = (
+            FORMULA_RENDER_AREA_H - TEXT_EDITOR_DEFAULT_H
+            + FORMULA_IMAGE_ROW_H - IMAGE_ROW_H
+            if self.row.kind == "formula" and not self._large_image
+            else 0
+        )
+        if self._formula_source_panel is not None and self._formula_source_panel.isVisible():
+            extra += FORMULA_SOURCE_PANEL_H
         if active:
             if self._large_image:
                 min_h, max_h = TABLE_LINE_PAIR_MIN_H, TABLE_LINE_PAIR_MAX_H
@@ -1923,8 +2066,13 @@ class _ProofRowWidget(QFrame):
             return
         self._formula_render_area.setVisible(True)
         visual = _render_formula_visual(
-            self.editor.toPlainText(),
-            target_height=40,
+            _formula_preview_source(
+                self.editor.toPlainText(),
+                self.row.formula_number_line.proof_text
+                if self.row.formula_number_line is not None
+                else "",
+            ),
+            target_height=FORMULA_RENDER_TARGET_H,
         )
         if visual is not None and visual.pixmap is not None:
             self._formula_render_label.setPixmap(visual.pixmap)
@@ -1996,11 +2144,32 @@ class _ProofRowWidget(QFrame):
         if end <= start:
             start, end = 0, len(text)
         self._formula_source_range = (start, end)
+        if self.row.kind == "formula" and start == 0 and end == len(text):
+            if self._formula_popup is not None:
+                self._formula_popup.hide()
+            if self._formula_source_panel is None:
+                self._formula_source_panel = _FormulaSourceInlinePanel(self)
+                self._formula_source_panel.source_changed.connect(
+                    self._apply_formula_source_text
+                )
+                self._formula_source_panel.closed.connect(
+                    self._on_formula_source_panel_closed
+                )
+                self._content_layout.addWidget(self._formula_source_panel)
+            self._formula_source_panel.open_for(text)
+            self.set_focus_depth("active")
+            return
         if self._formula_popup is None:
             self._formula_popup = _FormulaSourcePopup(self)
             self._formula_popup.source_changed.connect(self._apply_formula_source_text)
             self._formula_popup.closed.connect(self._on_formula_popup_closed)
         self._formula_popup.open_for(text[start:end], global_pos, editable=True)
+
+    def _open_standalone_formula_editor(self, global_pos: QPoint) -> None:
+        if self.row.kind != "formula":
+            return
+        self.activated.emit()
+        self._open_formula_source_editor(0, len(self.editor.toPlainText()), global_pos)
 
     def _apply_formula_source_text(self, source: str) -> None:
         if self._formula_source_range is None:
@@ -2016,6 +2185,12 @@ class _ProofRowWidget(QFrame):
     def _on_formula_popup_closed(self) -> None:
         self._formula_source_range = None
         self._refresh_editor_geometry()
+        self._refresh_status()
+
+    def _on_formula_source_panel_closed(self) -> None:
+        self._formula_source_range = None
+        self.set_focus_depth(self._focus_depth)
+        self._refresh_formula_render()
         self._refresh_status()
 
     # ── line image ─────────────────────────────────────────────
@@ -2598,6 +2773,18 @@ class HProofPanel(QWidget):
             self._rows = ()
             return
         pages = {page.page_uid: page for page in self._workspace.pages}
+        lines_by_key = {
+            (line.proof_uid, line.text_unit_uid): line
+            for line in self._workspace.lines
+        }
+        number_uid_by_formula = {
+            (link.proof_uid, link.formula_text_unit_uid): link.number_text_unit_uid
+            for link in self._workspace.formula_number_links
+        }
+        linked_number_keys = {
+            (link.proof_uid, link.number_text_unit_uid)
+            for link in self._workspace.formula_number_links
+        }
         rows: list[_ProofRow] = []
         for state in self._workspace.proof_states:
             page = pages.get(state.page_uid)
@@ -2605,11 +2792,25 @@ class HProofPanel(QWidget):
                 raise ValueError(f"proof state {state.proof_uid!r} has no page view")
             units = {unit.text_unit_uid: unit for unit in state.text_units}
             for line in state.lines:
+                if (state.proof_uid, line.text_unit_uid) in linked_number_keys:
+                    continue
                 unit = units.get(line.text_unit_uid)
                 if unit is None:
                     raise ValueError(f"proof line {line.text_unit_uid!r} has no text unit view")
                 atom_placements = _atom_placements(line)
                 kind = _row_kind(line, atom_placements)
+                number_uid = number_uid_by_formula.get(
+                    (state.proof_uid, line.text_unit_uid)
+                )
+                formula_number_line = (
+                    lines_by_key.get((state.proof_uid, number_uid))
+                    if number_uid is not None
+                    else None
+                )
+                if number_uid is not None and formula_number_line is None:
+                    raise ValueError(
+                        f"formula number link references missing text unit {number_uid!r}"
+                    )
                 rows.append(
                     _ProofRow(
                         key=(state.proof_uid, unit.text_unit_uid),
@@ -2621,6 +2822,7 @@ class HProofPanel(QWidget):
                         atom_placements=atom_placements,
                         kind=kind,
                         preview_source=_row_preview_source(line, atom_placements, kind),
+                        formula_number_line=formula_number_line,
                     )
                 )
         self._rows = tuple(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QListWidgetItem
 
@@ -477,7 +477,12 @@ def test_hproof_multiple_inline_formulas_render_independently(qapp, tmp_path) ->
 
 
 def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> None:
-    from app.ui.proof.h_proof import HProofPanel, _FormulaLineSourceEdit
+    from app.ui.proof.h_proof import (
+        FORMULA_IMAGE_ROW_H,
+        FORMULA_RENDER_AREA_H,
+        HProofPanel,
+        _FormulaLineSourceEdit,
+    )
 
     session, _service = _session(tmp_path)
     workspace = build_proof_workspace_view(session)
@@ -487,15 +492,94 @@ def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> N
     panel = HProofPanel(_formula_workspace(workspace, unit, line, state, text=text, line_kind="formula", atoms=atoms))
     widget = panel._row_widgets[("proof-1", "unit-1")]
     assert widget.row.kind == "formula"
-    # 三行：crop（图像）、渲染区、源码编辑器
+    # 默认双行：crop + 渲染。源码第三栏只由右键显式打开。
     assert isinstance(widget.editor, _FormulaLineSourceEdit)
     assert widget.editor.objectName() == "formulaSourceEdit"
+    assert widget.editor.isHidden()
+    assert widget._formula_source_panel is None
     assert not widget._formula_render_area.isHidden()
+    assert widget._image.height() == FORMULA_IMAGE_ROW_H
+    assert widget._formula_render_area.height() == FORMULA_RENDER_AREA_H
     has_render = (
         not widget._formula_render_label.pixmap().isNull()
         or bool(widget._formula_render_label.text())
     )
     assert has_render
+    widget._open_standalone_formula_editor(QPoint(20, 20))
+    assert widget._formula_source_panel is not None
+    assert not widget._formula_source_panel.isHidden()
+    assert widget.editor.isHidden()
+    panel.close()
+
+
+def test_formula_number_link_is_soft_and_hproof_groups_its_visuals(qapp, tmp_path, monkeypatch) -> None:
+    import app.ui.proof.h_proof as h_proof
+    from app.application.proof_workspace import FormulaNumberLinkView
+
+    monkeypatch.setattr(
+        h_proof,
+        "_render_formula_visual",
+        lambda text, target_height: h_proof._FormulaVisual(text=f"render:{text}"),
+    )
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+    formula_text = r"$E=mc^2$"
+    formula_unit = replace(unit, text=formula_text)
+    formula_line = replace(
+        line,
+        ocr_text=formula_text,
+        proof_text=formula_text,
+        bbox=(10, 10, 90, 30),
+        render_kind="formula",
+        region_kinds=("display_formula",),
+        atoms=(),
+    )
+    number_unit = replace(unit, text_unit_uid="unit-number", order=1, text="(2)")
+    number_line = replace(
+        line,
+        line_uid="line-number",
+        region_uid="region-number",
+        line_uids=("line-number",),
+        region_uids=("region-number",),
+        text_unit_uid="unit-number",
+        order=1,
+        ocr_text="(2)",
+        proof_text="(2)",
+        bbox=(100, 10, 120, 30),
+        render_kind="text",
+        region_kinds=("formula_number",),
+        atoms=(),
+        text_unit_revision=number_unit.revision,
+        text_unit_fingerprint=number_unit.fingerprint,
+    )
+    next_state = replace(
+        state,
+        text_units=(formula_unit, number_unit),
+        lines=(formula_line, number_line),
+    )
+    link = FormulaNumberLinkView(
+        proof_uid=state.proof_uid,
+        page_uid=state.page_uid,
+        formula_text_unit_uid=formula_unit.text_unit_uid,
+        number_text_unit_uid=number_unit.text_unit_uid,
+    )
+    linked_workspace = replace(
+        workspace,
+        proof_states=(next_state,),
+        lines=(formula_line, number_line),
+        formula_number_links=(link,),
+    )
+
+    panel = h_proof.HProofPanel(linked_workspace)
+    assert [row.unit.text_unit_uid for row in panel._rows] == ["unit-1"]
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert widget.row.formula_number_line == number_line
+    assert widget._line_bbox == (10, 10, 120, 30)
+    assert widget._formula_render_label.text() == r"render:E=mc^2 \tag{2}"
+    assert widget.editor.toPlainText() == formula_text
     panel.close()
 
 

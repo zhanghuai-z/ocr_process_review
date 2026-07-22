@@ -6,6 +6,7 @@ import pytest
 
 from app.core.layout_scope import layout_snapshot_fingerprint
 from app.application.proof_workspace import (
+    FormulaNumberLinkView,
     ProofAtomView,
     ProofLineView,
     ProofPageView,
@@ -305,6 +306,68 @@ def test_query_projects_active_ocr_and_proof_state_into_stable_read_views() -> N
     assert atom.geometry_available is True
     assert view.atoms == line.atoms
     _assert_dto_graph_is_value_only(view)
+
+
+def test_formula_number_link_requires_one_unambiguous_right_side_number() -> None:
+    from app.application.proof_workspace import _formula_number_links
+
+    session, _state, _batch, _pointer = _session()
+    view = build_proof_workspace_view(session)
+    state = view.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+    formula_unit = replace(unit, text="x=1")
+    formula_line = replace(
+        line,
+        proof_text="x=1",
+        ocr_text="x=1",
+        bbox=(20, 20, 120, 50),
+        render_kind="formula",
+        region_kinds=("display_formula",),
+        atoms=(),
+    )
+    number_unit = replace(unit, text_unit_uid="unit-number", order=1, text="(1)")
+    number_line = replace(
+        line,
+        line_uid="line-number",
+        region_uid="region-number",
+        line_uids=("line-number",),
+        region_uids=("region-number",),
+        text_unit_uid=number_unit.text_unit_uid,
+        order=1,
+        proof_text="(1)",
+        ocr_text="(1)",
+        bbox=(140, 25, 165, 45),
+        render_kind="text",
+        region_kinds=("formula_number",),
+        atoms=(),
+    )
+    linked_state = replace(
+        state,
+        text_units=(formula_unit, number_unit),
+        lines=(formula_line, number_line),
+    )
+
+    assert _formula_number_links(linked_state) == (
+        FormulaNumberLinkView(
+            proof_uid=state.proof_uid,
+            page_uid=state.page_uid,
+            formula_text_unit_uid=formula_unit.text_unit_uid,
+            number_text_unit_uid=number_unit.text_unit_uid,
+        ),
+    )
+    ambiguous_formula = replace(
+        formula_line,
+        text_unit_uid="unit-formula-2",
+        line_uid="line-formula-2",
+        line_uids=("line-formula-2",),
+        region_uid="region-formula-2",
+        region_uids=("region-formula-2",),
+        bbox=(25, 20, 125, 50),
+    )
+    assert _formula_number_links(
+        replace(linked_state, lines=(formula_line, ambiguous_formula, number_line))
+    ) == ()
 
 
 def test_line_view_keeps_complete_mapped_line_atoms_with_explicit_unmapped_metadata() -> None:
