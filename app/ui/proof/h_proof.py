@@ -1892,7 +1892,6 @@ class _ProofRowWidget(QFrame):
         self.editor.setPlainText(row.unit.text)
         self.set_status(row.unit.status)
         self.set_active(False)
-        self._refresh_formula_render()
         self._refresh_image()
 
     # ── status / conflict ──────────────────────────────────────
@@ -1917,7 +1916,8 @@ class _ProofRowWidget(QFrame):
             )
             self._refresh_image()
         self._refresh_status()
-        self._refresh_formula_render()
+        if self._focus_depth == "active":
+            self._refresh_formula_render()
         self._refresh_editor_geometry()
         self._refresh_extra_selections()
 
@@ -2065,6 +2065,8 @@ class _ProofRowWidget(QFrame):
         self.set_active(active)
         self.editor.setVisible(active and self.row.kind != "formula")
         self._formula_render_area.setVisible(active and self.row.kind == "formula")
+        if active and self.row.kind == "formula":
+            self._refresh_formula_render()
         if not active and self._formula_source_panel is not None:
             self._formula_source_panel.hide()
         self._image.setFixedHeight(
@@ -2115,6 +2117,9 @@ class _ProofRowWidget(QFrame):
         """
 
         if self.row.kind != "formula":
+            self._formula_render_area.setVisible(False)
+            return
+        if self._focus_depth != "active":
             self._formula_render_area.setVisible(False)
             return
         self._formula_render_area.setVisible(self._focus_depth == "active")

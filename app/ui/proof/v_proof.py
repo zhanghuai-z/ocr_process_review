@@ -19,13 +19,14 @@ Interaction model restored from the mature vertical proof view (d4c6dfe):
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QIcon,
+    QImage,
     QImageReader,
     QKeySequence,
     QPainter,
@@ -88,6 +89,25 @@ class _SceneBBox:
 
 def _entry_key(entry: ProofCharView) -> tuple[str, str, int, str | None]:
     return (entry.proof_uid, entry.text_unit_uid, entry.char_index, entry.atom_uid)
+
+
+def _char_index_group(text: str) -> int:
+    """Order character buckets as CJK, letters, digits, then punctuation."""
+
+    if len(text) == 1:
+        codepoint = ord(text)
+        if (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0x20000 <= codepoint <= 0x323AF
+        ):
+            return 0
+    if text.isalpha():
+        return 1
+    if text.isdigit():
+        return 2
+    return 3
 
 
 def _gallery_crop_pad(entry: ProofCharView) -> int:
@@ -183,6 +203,39 @@ def _crop_page_pixmap(
     return page_pixmap.copy(crop_rect).scaled(
         max(1, target.width()),
         max(1, target.height()),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _crop_page_image(
+    page: ProofPageView,
+    page_image: QImage,
+    bbox: tuple[int, int, int, int] | None,
+    target_size: QSize,
+    *,
+    pad: int = 0,
+) -> QPixmap:
+    """Crop one original page decode without reopening the image file."""
+
+    if bbox is None or page_image.isNull() or page.width <= 0 or page.height <= 0:
+        return QPixmap()
+    left, top, right, bottom = bbox
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(page.width, right + pad)
+    bottom = min(page.height, bottom + pad)
+    source_rect = QRect(
+        round(left * page_image.width() / page.width),
+        round(top * page_image.height() / page.height),
+        max(1, round((right - left) * page_image.width() / page.width)),
+        max(1, round((bottom - top) * page_image.height() / page.height)),
+    ).intersected(page_image.rect())
+    if source_rect.isEmpty():
+        return QPixmap()
+    return QPixmap.fromImage(page_image.copy(source_rect)).scaled(
+        max(1, target_size.width()),
+        max(1, target_size.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
@@ -290,6 +343,7 @@ class VProofPanel(QWidget):
         self._selected_entry: ProofCharView | None = None
         self._page_pixmaps: dict[str, QPixmap] = {}
         self._page_pixmap_keys: dict[str, tuple[str, int]] = {}
+        self._icon_cache: OrderedDict[tuple[object, ...], QIcon] = OrderedDict()
         self._viewer_page_uid: str | None = None
         self._candidate_buttons: list[QPushButton] = []
         self._build_ui()
@@ -608,7 +662,10 @@ class VProofPanel(QWidget):
         counts = Counter(entry.text for entry in available if not query or query in entry.text)
         self._char_list.blockSignals(True)
         self._char_list.clear()
-        for text, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        for text, count in sorted(
+            counts.items(),
+            key=lambda item: (_char_index_group(item[0]), -item[1], item[0].casefold(), item[0]),
+        ):
             item = QListWidgetItem(f"{text}  {count}")
             item.setData(Qt.ItemDataRole.UserRole, text)
             self._char_list.addItem(item)
@@ -758,6 +815,7 @@ class VProofPanel(QWidget):
             0,
             viewport_rect.height(),
         )
+        pending_by_page: dict[str, list[tuple[QListWidgetItem, ProofCharView]]] = defaultdict(list)
         for row in range(self._gallery.count()):
             item = self._gallery.item(row)
             if not item.data(_ICON_PENDING_ROLE):
@@ -766,8 +824,13 @@ class VProofPanel(QWidget):
                 continue
             entry = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(entry, ProofCharView):
-                item.setIcon(self._entry_icon(entry))
-            item.setData(_ICON_PENDING_ROLE, False)
+                pending_by_page[entry.page_uid].append((item, entry))
+        for page_uid, pending in pending_by_page.items():
+            page = self._pages.get(page_uid)
+            page_image = QImageReader(page.image_path).read() if page is not None else QImage()
+            for item, entry in pending:
+                item.setIcon(self._entry_icon(entry, page_image=page_image))
+                item.setData(_ICON_PENDING_ROLE, False)
 
     def _restore_gallery_selection_by_occurrence_keys(
         self,
@@ -801,20 +864,32 @@ class VProofPanel(QWidget):
         self._selected_entry = entry if isinstance(entry, ProofCharView) else None
         return True
 
-    def _entry_icon(self, entry: ProofCharView) -> QIcon:
+    def _entry_icon(self, entry: ProofCharView, *, page_image: QImage | None = None) -> QIcon:
         page = self._pages.get(entry.page_uid)
         if page is None or entry.bbox is None:
             return QIcon()
+        pad = _gallery_crop_pad(entry)
+        cache_key = (
+            page.page_uid,
+            page.image_path,
+            page.image_revision,
+            entry.bbox,
+            pad,
+        )
+        cached = self._icon_cache.get(cache_key)
+        if cached is not None:
+            self._icon_cache.move_to_end(cache_key)
+            return cached
         # 2x source density: Qt only ever down-scales the thumbnail.
         cell = GALLERY_CELL * 2
         canvas = QPixmap(cell, cell)
         canvas.fill(QColor("#FFFDF8"))
         painter = QPainter(canvas)
-        crop = _page_pixmap(
-            page,
-            entry.bbox,
-            QSize(cell - 16, cell - 16),
-            pad=_gallery_crop_pad(entry),
+        target = QSize(cell - 16, cell - 16)
+        crop = (
+            _crop_page_image(page, page_image, entry.bbox, target, pad=pad)
+            if page_image is not None and not page_image.isNull()
+            else _page_pixmap(page, entry.bbox, target, pad=pad)
         )
         if crop.isNull():
             painter.end()
@@ -822,7 +897,11 @@ class VProofPanel(QWidget):
         painter.drawPixmap((cell - crop.width()) // 2, (cell - crop.height()) // 2, crop)
         # 旧版心智：相同字索引就是普通的字符切图，不画边框/置信度标记
         painter.end()
-        return QIcon(canvas)
+        icon = QIcon(canvas)
+        self._icon_cache[cache_key] = icon
+        while len(self._icon_cache) > 512:
+            self._icon_cache.popitem(last=False)
+        return icon
 
     def _remember_page_pixmap(self, page: ProofPageView, pixmap: QPixmap) -> None:
         self._page_pixmaps[page.page_uid] = pixmap

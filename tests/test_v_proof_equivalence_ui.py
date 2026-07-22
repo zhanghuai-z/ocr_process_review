@@ -207,6 +207,23 @@ def test_vproof_uses_character_crops_and_highlights_one_ocr_occurrence(
     panel.close()
 
 
+def test_vproof_character_index_orders_cjk_letters_digits_then_punctuation() -> None:
+    from app.ui.proof.v_proof import _char_index_group
+
+    values = [",", "2", "B", "的", "1", "a", "业", "（"]
+
+    assert sorted(values, key=lambda value: (_char_index_group(value), value.casefold())) == [
+        "业",
+        "的",
+        "a",
+        "B",
+        "1",
+        "2",
+        ",",
+        "（",
+    ]
+
+
 def test_vproof_page_context_aggregates_regions_without_changing_char_identity(
     qapp: QApplication,
     tmp_path: Path,
