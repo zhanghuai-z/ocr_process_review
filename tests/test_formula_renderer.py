@@ -115,6 +115,31 @@ def test_formula_renderer_prefers_mathjax_by_default(monkeypatch):
     assert result.logical_height == 30
 
 
+def test_formula_renderer_uses_in_process_mathtext_when_mathjax_is_unavailable(monkeypatch):
+    from app.ui.proof import formula_renderer
+
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
+    monkeypatch.delenv("OCR_FORMULA_ENGINE", raising=False)
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("node unavailable")
+
+    monkeypatch.setattr(formula_renderer, "_render_mathjax_svg_pixmap", unavailable)
+    formula_renderer.clear_formula_render_cache()
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    result = formula_renderer.render_formula_pixmap(
+        r"$\frac{a+b}{c+d}=x^2$",
+        target_height=36,
+    )
+
+    assert result is not None
+    assert result.backend == "mathtext"
+    assert result.logical_height == 36
+    assert result.pixmap.width() > result.pixmap.height()
+
+
 def test_formula_rendering_node_executable_can_be_overridden(monkeypatch, tmp_path):
     from app.ui.proof import formula_renderer
 

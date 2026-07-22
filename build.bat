@@ -60,13 +60,14 @@ python -c "import jinja2"        2>nul || (echo   [MISS] Jinja2 & set NEED_PIP=1
 python -c "import PIL"           2>nul || (echo   [MISS] Pillow & set NEED_PIP=1)
 python -c "import cv2"           2>nul || (echo   [MISS] opencv-python & set NEED_PIP=1)
 python -c "import numpy"         2>nul || (echo   [MISS] numpy & set NEED_PIP=1)
+python -c "import matplotlib"    2>nul || (echo   [MISS] matplotlib & set NEED_PIP=1)
 python -c "import fitz"          2>nul || (echo   [MISS] PyMuPDF & set NEED_PIP=1)
 python -c "import requests"      2>nul || (echo   [MISS] requests & set NEED_PIP=1)
 
 if %NEED_PIP%==1 (
     echo.
     echo   Installing missing packages...
-    pip install PySide6 lxml fpdf2 python-docx Jinja2 Pillow opencv-python numpy PyMuPDF requests
+    pip install PySide6 lxml fpdf2 python-docx Jinja2 Pillow opencv-python numpy matplotlib PyMuPDF requests
     if errorlevel 1 (
         echo [FAIL] pip install failed.
         exit /b 1

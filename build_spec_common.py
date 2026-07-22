@@ -23,7 +23,7 @@ def collect_shared_build_inputs(*, include_tools: bool = False):
                 datas.append((str(f), rel_parent))
 
     # 公式渲染资产：MathJax 以 node_modules 形式随包分发，运行时由
-    # app.experimental.formula_rendering 通过 NODE_PATH 定位。
+    # app.ui.proof.formula_renderer 通过 NODE_PATH 定位。
     formula_dir = PROJECT_ROOT / "resources" / "formula"
     if formula_dir.exists():
         for f in formula_dir.rglob("*"):
@@ -61,6 +61,7 @@ def collect_shared_build_inputs(*, include_tools: bool = False):
         "sqlite3",
         "numpy",
         "numpy.core._multiarray_umath",
+        "matplotlib.mathtext",
     ]
     hiddenimports += collect_submodules("app")
     if include_tools:
@@ -68,7 +69,6 @@ def collect_shared_build_inputs(*, include_tools: bool = False):
 
     excludes = [
         "tkinter",
-        "matplotlib",
         "scipy",
         "IPython",
         "notebook",

@@ -5,9 +5,10 @@ This module is intentionally isolated:
 - no proof data writes;
 - no OCR/layout dependency;
 - no import from UI panels;
-- one public rendering function returning a ``QPixmap``;
-Current default backend is MathJax SVG. LaTeX + dvisvgm remains an explicit
-optional backend because it depends on a full TeX installation.
+- one public rendering function returning a ``QPixmap``.
+
+MathJax SVG is preferred. Matplotlib MathText is the in-process backend used
+when an external JavaScript or TeX executor is unavailable.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import tempfile
 import json
 from threading import Lock, Thread
 
+import numpy as np
 from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -205,8 +207,8 @@ def render_formula_pixmap(
                 backend="mathjax_svg",
             )
         except Exception:
-            return None
-    if engine == "latex_svg":
+            pass
+    elif engine == "latex_svg":
         try:
             pixmap, logical_width, logical_height = _render_latex_svg_pixmap(
                 latex,
@@ -223,13 +225,31 @@ def render_formula_pixmap(
                 backend="latex_svg",
             )
         except Exception:
-            return None
-    return None
+            pass
+    try:
+        pixmap, logical_width, logical_height = _render_mathtext_pixmap(
+            latex,
+            color,
+            physical_height=physical_height,
+            dpr=dpr,
+            dpi=dpi,
+            oversample=oversample,
+        )
+    except Exception:
+        return None
+    return FormulaRenderResult(
+        pixmap=pixmap,
+        normalized_latex=latex,
+        logical_width=logical_width,
+        logical_height=logical_height,
+        device_pixel_ratio=dpr,
+        backend="mathtext",
+    )
 
 
 def clear_formula_render_cache() -> None:
     """Clear cached formula renderer outputs."""
-    for renderer in (_render_mathjax_svg, _render_latex_svg):
+    for renderer in (_render_mathjax_svg, _render_latex_svg, _render_mathtext_rgba):
         cache_clear = getattr(renderer, "cache_clear", None)
         if callable(cache_clear):
             cache_clear()
@@ -275,9 +295,81 @@ def _contains_cjk(text: str) -> bool:
 
 def _formula_engine() -> str:
     value = os.environ.get(ENV_ENGINE, DEFAULT_ENGINE).strip().lower()
+    if value in {"mathtext", "matplotlib"}:
+        return "mathtext"
     if value in {"latex", "latex_svg", "dvisvgm", "latex_dvisvgm"}:
         return "latex_svg"
     return "mathjax_svg"
+
+
+def _render_mathtext_pixmap(
+    latex: str,
+    color: str,
+    *,
+    physical_height: int,
+    dpr: float,
+    dpi: int,
+    oversample: float,
+) -> tuple[QPixmap, int, int]:
+    render_dpi = max(72, int(round(float(dpi) * dpr * max(1.0, float(oversample)))))
+    rgba = _render_mathtext_rgba(latex, color, render_dpi)
+    if rgba.size == 0:
+        raise RuntimeError("mathtext returned an empty image")
+    image = _rgba_to_qimage(rgba)
+    if image.height() != physical_height:
+        image = image.scaledToHeight(
+            physical_height,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    pixmap = QPixmap.fromImage(image)
+    if pixmap.isNull():
+        raise RuntimeError("mathtext returned an empty pixmap")
+    pixmap.setDevicePixelRatio(dpr)
+    return (
+        pixmap,
+        max(1, int(round(pixmap.width() / dpr))),
+        max(1, int(round(pixmap.height() / dpr))),
+    )
+
+
+def _rgba_to_qimage(rgba: np.ndarray) -> QImage:
+    return QImage(
+        rgba.data,
+        rgba.shape[1],
+        rgba.shape[0],
+        rgba.strides[0],
+        QImage.Format.Format_RGBA8888,
+    ).copy()
+
+
+@lru_cache(maxsize=256)
+def _render_mathtext_rgba(latex: str, color: str, dpi: int) -> np.ndarray:
+    _prepare_matplotlib_env()
+    from matplotlib.mathtext import MathTextParser
+
+    parsed = MathTextParser("agg").parse(latex, dpi=dpi)
+    alpha = np.asarray(parsed.image, dtype=np.uint8)
+    qcolor = QColor(color)
+    rgb = np.array([qcolor.red(), qcolor.green(), qcolor.blue()], dtype=np.uint8)
+    rgba = np.zeros((alpha.shape[0], alpha.shape[1], 4), dtype=np.uint8)
+    rgba[:, :, 0:3] = rgb
+    rgba[:, :, 3] = alpha
+    visible = alpha > 0
+    if not np.any(visible):
+        return rgba
+    rows = np.where(np.any(visible, axis=1))[0]
+    cols = np.where(np.any(visible, axis=0))[0]
+    top = max(0, int(rows[0]) - 1)
+    bottom = min(rgba.shape[0], int(rows[-1]) + 2)
+    left = max(0, int(cols[0]) - 1)
+    right = min(rgba.shape[1], int(cols[-1]) + 2)
+    return np.ascontiguousarray(rgba[top:bottom, left:right, :])
+
+
+def _prepare_matplotlib_env() -> None:
+    cache_dir = Path(tempfile.gettempdir()) / "ocr_process_matplotlib"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
 
 
 def _current_device_pixel_ratio() -> float:
