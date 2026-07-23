@@ -474,6 +474,61 @@ def test_hanwang_keeps_unbound_pp_symbol_out_of_charocr_text():
     assert stats.ppocr_symbol_observations_unbound == 1
 
 
+def test_hanwang_inserts_uniquely_owned_pp_symbol_missing_from_native_atoms():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    observation_bbox = (46, 24, 52, 31)
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
+        ppocr_symbol_observations=(PpOcrSymbolObservation(
+            text="、",
+            bbox=observation_bbox,
+            proposal_bbox=(42, 6, 56, 36),
+        ),),
+    )
+    grouped = {(0, 0, 0): [micro_module._NativeLineResult(
+        text="jp",
+        bbox=(0, 0, 100, 40),
+        chars=[
+            micro_module._NativeAtomResult(
+                text="j",
+                bbox=(20, 8, 36, 32),
+                source="hanwang:micro_recblock",
+            ),
+            micro_module._NativeAtomResult(
+                text="p",
+                bbox=(62, 8, 78, 32),
+                source="hanwang:micro_recblock",
+            ),
+        ],
+    )]}
+    stats = micro_module.RunStats()
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+        stats=stats,
+    )
+
+    assert lines[0].text == "j、p"
+    assert [char.text for char in lines[0].chars] == ["j", "、", "p"]
+    inserted = lines[0].chars[1]
+    assert inserted.bbox == observation_bbox
+    assert inserted.source == "ppocrv6:symbol_foreground_observation"
+    assert inserted.token_text == "、"
+    assert stats.ppocr_symbol_observations_bound == 1
+    assert stats.ppocr_symbol_observations_unbound == 0
+    observed = micro_module._native_line_observation(lines[0])
+    assert observed.text == "j、p"
+    assert observed.atoms[1].text == "、"
+    assert observed.atoms[1].bbox == observation_bbox
+    assert observed.atoms[1].source == "ppocrv6:symbol_foreground_observation"
+
+
 def test_hanwang_saves_uniquely_bound_pp_symbol_as_external_candidate():
     import app.engines.hanwang.micro_recblock as micro_module
 

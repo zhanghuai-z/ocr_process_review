@@ -560,11 +560,12 @@ def _attach_ppocr_symbol_candidates(
     lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation, ...],
 ) -> tuple[list[_NativeLineResult], int, int]:
-    """Retain a uniquely bound PP symbol as a non-authoritative candidate."""
+    """Retain a uniquely bound PP symbol observation or missing native atom."""
     return _attach_owned_text_candidates(
         lines,
         observations,
         source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+        insert_missing_native_atom=True,
     )
 
 
@@ -585,6 +586,7 @@ def _attach_owned_text_candidates(
     observations: tuple[PpOcrSymbolObservation | VlSemanticMarkerObservation, ...],
     *,
     source: str,
+    insert_missing_native_atom: bool = False,
 ) -> tuple[list[_NativeLineResult], int, int]:
     if not lines or not observations:
         return lines, 0, len(observations)
@@ -609,6 +611,31 @@ def _attach_owned_text_candidates(
             and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
         ]
+        intersecting = [
+            index
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+            and _intersect_xyxy(char.bbox, observation.bbox) is not None
+        ]
+        if len(claimed) == 0 and insert_missing_native_atom and not intersecting:
+            insertion = next((
+                index
+                for index, char in enumerate(line.chars)
+                if char.bbox is not None
+                and _bbox_center(char.bbox)[0] > center_x
+            ), len(line.chars))
+            line.chars.insert(insertion, _NativeAtomResult(
+                text=observation.text,
+                confidence=0.0,
+                bbox=observation.bbox,
+                candidates=[observation.text],
+                source=source,
+                bbox_granularity="char" if len(observation.text) == 1 else "word",
+                token_text=observation.text,
+            ))
+            line.text = _line_chars_text(line.chars).strip()
+            bound += 1
+            continue
         if len(claimed) != 1:
             unbound += 1
             continue

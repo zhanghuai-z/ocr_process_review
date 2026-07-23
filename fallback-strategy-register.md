@@ -37,9 +37,9 @@
 
 ### PPVL 不再作为正文 OCR fallback
 
-正文 OCR 不允许在 Hanwang/CharOCR 非空时由 PPVL 文本覆盖、插入或重排正文。唯一例外是上表登记的 EngCut 空结果 route-local PP word 降级；它必须明确标源并进入统计，不能扩张成整行或整块静默回填。
+正文 OCR 不允许在 Hanwang/CharOCR 非空时由 PPVL 文本覆盖、插入或重排正文。EngCut 空结果 route-local PP word 降级必须明确标源并进入统计，不能扩张成整行或整块静默回填。PP-OCRv6 独立标点 observation 的受限缺失 atom 路径不是 PPVL 正文 fallback。
 
-PP-OCRv6 prepass 与 PPVL 版面响应不是同一事实。完整组件归属的独立标点和唯一几何绑定的等长拉丁文本分歧，在 CharOCR 非空时只可保存为带独立来源和 bbox 的 `OcrCandidate`。无法一对一绑定的观察只进入运行诊断，不得制造 OCR atom。
+PP-OCRv6 prepass 与 PPVL 版面响应不是同一事实。唯一几何绑定的等长拉丁文本分歧，在 CharOCR 非空时只可保存为带独立来源和 bbox 的 `OcrCandidate`。完整组件独立标点若唯一归属一条物理行、且 observation bbox 与任何 native atom 均不相交，可按几何顺序创建 `ppocrv6:symbol_foreground_observation` atom；存在重叠、多个行所有者或其他归属歧义时只进入运行诊断。
 
 EngCut 空结果 PP word 降级的退出条件是该 segment 出现任意非空 native 文本；此时无条件采用 CharOCR 字符级输出，PP 分歧最多作为候选保留，不存在两条正文择优路径。
 
