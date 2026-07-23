@@ -10,6 +10,7 @@ from app.application.ocr_workspace import build_ocr_workspace_view
 from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.charocr_execution import (
     CharOcrAtomObservation,
+    CharOcrCandidateObservation,
     CharOcrLineObservation,
     CharOcrPageResult,
     CharOcrRegionObservation,
@@ -90,6 +91,12 @@ class _Engine:
                     atoms=(CharOcrAtomObservation(
                         text="machine", bbox=(2, 3, 30, 15), confidence=0.8, source="test",
                         granularity="word", token_text="machine",
+                        candidates=(CharOcrCandidateObservation(
+                            text="rnachine",
+                            confidence=0.0,
+                            source="ppocrv6:latin_token_text_alignment",
+                            bbox=(3, 4, 29, 14),
+                        ),),
                     ),),
                 ),),
             ),),
@@ -118,6 +125,10 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     assert atom.source == "test"
     assert atom.granularity == "word"
     assert atom.token_text == "machine"
+    candidate = session.ocr_observation_repository.get_candidate(atom.candidate_uids[0])
+    assert candidate.text == "rnachine"
+    assert candidate.source == "ppocrv6:latin_token_text_alignment"
+    assert candidate.bbox == (3, 4, 29, 14)
     proof = session.proof_repository.get_state("proof-1")
     assert proof.text_units[0].text == "human correction"
     assert proof.rebind_required is True

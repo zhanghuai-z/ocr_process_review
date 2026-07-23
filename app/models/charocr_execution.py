@@ -100,6 +100,8 @@ class CharOcrPageRequest:
 class CharOcrCandidateObservation:
     text: str
     confidence: float
+    source: str = ""
+    bbox: XYXY | None = None
 
 
 @dataclass(frozen=True, slots=True)

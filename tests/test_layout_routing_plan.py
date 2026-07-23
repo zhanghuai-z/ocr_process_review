@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from app.models.charocr_routing import (
@@ -342,7 +343,7 @@ def test_vl_marker_observations_round_trip_on_physical_routing_line():
     assert restored.vl_marker_observations == (observation,)
 
 
-def test_hanwang_reconciles_explicit_vl_marker_with_linecut_geometry():
+def test_hanwang_keeps_charocr_text_when_vl_marker_spans_multiple_atoms():
     import app.engines.hanwang.micro_recblock as micro_module
 
     route = RoutingLine(
@@ -365,17 +366,249 @@ def test_hanwang_reconciles_explicit_vl_marker_with_linecut_geometry():
         ],
     )]}
 
+    stats = micro_module.RunStats()
     lines = micro_module._assemble_layout_route_line(
         block_idx=0,
         line_idx=0,
         route=route,
         grouped_lines=grouped,
+        stats=stats,
     )
 
-    assert lines[0].text == "⑫Barry"
-    assert [char.text for char in lines[0].chars] == ["⑫", "Barry"]
-    assert lines[0].chars[0].bbox == (8, 10, 24, 32)
-    assert lines[0].chars[0].source == "paddlevl:semantic_marker"
+    assert lines[0].text == "12Barry"
+    assert [char.text for char in lines[0].chars] == ["1", "2", "Barry"]
+    assert all(not char.external_candidates for char in lines[0].chars)
+    assert stats.vl_marker_observations_bound == 0
+    assert stats.vl_marker_observations_unbound == 1
+
+
+def test_hanwang_saves_uniquely_bound_vl_marker_as_external_candidate():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    observation_bbox = (8, 10, 24, 32)
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 130, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 130, 40)),),
+        vl_marker_observations=(VlSemanticMarkerObservation(
+            text="⑫",
+            bbox=observation_bbox,
+            proposal_bbox=(4, 6, 38, 36),
+        ),),
+    )
+    grouped = {(0, 0, 0): [micro_module._NativeLineResult(
+        text="12",
+        bbox=(6, 8, 120, 34),
+        chars=[micro_module._NativeAtomResult(
+            text="12",
+            bbox=(8, 10, 24, 32),
+            source="hanwang:geometry_reconciled",
+        )],
+    )]}
+    stats = micro_module.RunStats()
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+        stats=stats,
+    )
+
+    assert lines[0].text == "12"
+    assert [char.text for char in lines[0].chars] == ["12"]
+    assert lines[0].chars[0].source == "hanwang:geometry_reconciled"
+    assert lines[0].chars[0].external_candidates == [
+        micro_module.CharOcrCandidateObservation(
+            text="⑫",
+            confidence=0.0,
+            source="paddlevl:semantic_marker",
+            bbox=observation_bbox,
+        )
+    ]
+    assert stats.vl_marker_observations_bound == 1
+    assert stats.vl_marker_observations_unbound == 0
+
+
+def test_hanwang_keeps_unbound_pp_symbol_out_of_charocr_text():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
+        ppocr_symbol_observations=(PpOcrSymbolObservation(
+            text="/",
+            bbox=(39, 10, 61, 31),
+            proposal_bbox=(50, 6, 72, 36),
+            leading_space=True,
+            trailing_space=True,
+        ),),
+    )
+    native_bbox = (39, 10, 59, 31)
+    grouped = {(0, 0, 0): [micro_module._NativeLineResult(
+        text="N",
+        bbox=(0, 0, 100, 40),
+        chars=[micro_module._NativeAtomResult(
+            text="N",
+            bbox=native_bbox,
+            source="hanwang:micro_recblock",
+        )],
+    )]}
+    stats = micro_module.RunStats()
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+        stats=stats,
+    )
+
+    assert lines[0].text == "N"
+    assert [char.text for char in lines[0].chars] == ["N"]
+    assert lines[0].chars[0].bbox == native_bbox
+    assert lines[0].chars[0].source == "hanwang:micro_recblock"
+    assert lines[0].chars[0].external_candidates == []
+    assert stats.ppocr_symbol_observations_bound == 0
+    assert stats.ppocr_symbol_observations_unbound == 1
+
+
+def test_hanwang_saves_uniquely_bound_pp_symbol_as_external_candidate():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    observation_bbox = (39, 10, 61, 31)
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
+        ppocr_symbol_observations=(PpOcrSymbolObservation(
+            text="/",
+            bbox=observation_bbox,
+            proposal_bbox=(30, 6, 72, 36),
+        ),),
+    )
+    native_bbox = (39, 10, 59, 31)
+    grouped = {(0, 0, 0): [micro_module._NativeLineResult(
+        text="N",
+        bbox=(0, 0, 100, 40),
+        chars=[micro_module._NativeAtomResult(
+            text="N",
+            bbox=native_bbox,
+            source="hanwang:micro_recblock",
+        )],
+    )]}
+    stats = micro_module.RunStats()
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+        stats=stats,
+    )
+
+    assert lines[0].text == "N"
+    assert [char.text for char in lines[0].chars] == ["N"]
+    assert lines[0].chars[0].bbox == native_bbox
+    assert lines[0].chars[0].source == "hanwang:micro_recblock"
+    assert lines[0].chars[0].external_candidates == [
+        micro_module.CharOcrCandidateObservation(
+            text="/",
+            confidence=0.0,
+            source="ppocrv6:symbol_foreground_observation",
+            bbox=observation_bbox,
+        )
+    ]
+    assert stats.ppocr_symbol_observations_bound == 1
+    assert stats.ppocr_symbol_observations_unbound == 0
+    observed = micro_module._native_line_observation(lines[0])
+    assert observed.text == "N"
+    assert observed.atoms[0].text == "N"
+    assert observed.atoms[0].candidates[-1] == micro_module.CharOcrCandidateObservation(
+        text="/",
+        confidence=0.0,
+        source="ppocrv6:symbol_foreground_observation",
+        bbox=observation_bbox,
+    )
+
+
+def test_engcut_keeps_native_text_and_saves_equal_length_pp_candidates():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    native_bbox = (10, 5, 25, 30)
+    text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+        [micro_module.EngcutChar(text="N", bbox=native_bbox)],
+        ppocr_tokens=(PpOcrLatinTokenObservation("V", (5, 0, 30, 35)),),
+    )
+
+    assert text == "N"
+    assert [atom.text for atom in atoms] == ["N"]
+    assert atoms[0].bbox == native_bbox
+    assert atoms[0].source == "hanwang:EngCut:latin_route"
+    assert atoms[0].token_text == "N"
+    assert atoms[0].external_candidates == [
+        micro_module.CharOcrCandidateObservation(
+            text="V",
+            confidence=0.0,
+            source="ppocrv6:latin_token_text_alignment",
+            bbox=(5, 0, 30, 35),
+        )
+    ]
+    assert disagreed is True
+
+
+def test_engcut_keeps_native_text_without_guessing_unequal_pp_alignment():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+        [micro_module.EngcutChar(text="N", bbox=(10, 5, 25, 30))],
+        ppocr_tokens=(PpOcrLatinTokenObservation("/V", (5, 0, 30, 35)),),
+    )
+
+    assert text == "N"
+    assert [atom.text for atom in atoms] == ["N"]
+    assert atoms[0].external_candidates == []
+    assert disagreed is True
+
+
+def test_engcut_empty_native_result_keeps_explicit_pp_fallback(monkeypatch):
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    segment = micro_module._TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(10, 10, 90, 40),
+        kind="text_latin",
+        ppocr_latin_fallback_text="PE/VC",
+        ppocr_latin_tokens=(PpOcrLatinTokenObservation("PE/VC", (10, 10, 90, 40)),),
+    )
+    route = micro_module._EngCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(10, 10, 90, 40),
+        segments=(segment,),
+    )
+    monkeypatch.setattr(
+        micro_module.native_bridge,
+        "run_eng20_recogline",
+        lambda *_args, **_kwargs: {"lines": []},
+    )
+    stats = micro_module.RunStats()
+
+    result = micro_module._recognize_engcut_masked_line(
+        np.full((60, 110, 3), 255, dtype=np.uint8),
+        route,
+        stats,
+        timeout=1.0,
+    )[segment.key]
+
+    assert result.text == "PE/VC"
+    assert [atom.text for atom in result.chars] == ["PE/VC"]
+    assert result.chars[0].source == "ppocrv6:latin_route_empty_native"
+    assert result.review_flags == ["latin_route_empty_native_ppocr_fallback"]
+    assert stats.latin_empty_native_fallbacks == 1
 
 
 def test_hanwang_assembles_explicit_text_segment_kinds():
@@ -418,6 +651,7 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
         line_idx=0,
         route=route,
         grouped_lines=grouped,
+        stats=micro_module.RunStats(),
     )
 
     assert len(lines) == 1
@@ -460,6 +694,7 @@ def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line()
         line_idx=0,
         route=route,
         grouped_lines=grouped,
+        stats=micro_module.RunStats(),
     )
 
     assert len(lines) == 1
@@ -494,6 +729,7 @@ def test_hanwang_keeps_ppocr_physical_row_when_native_group_is_partial():
         line_idx=0,
         route=route,
         grouped_lines=grouped,
+        stats=micro_module.RunStats(),
     )
 
     assert len(lines) == 1

@@ -77,7 +77,7 @@ python -m pytest -q
 - 公式、表格、图片和装饰所有权先于文本分流；表格和图片不进入普通文本路由。
 - 拉丁字母与数字进入 EngCut；剩余中文及其上下文符号进入 LineCut。
 - 混合行是物理行状态，不是一个 `text_mixed` 目标。它应在 CharOCR 前拆为有明确所有权的 segment。
-- 路由不完整或归属含糊时只阻断当前页，并保留可审计 issue；不得静默整行 fallback、使用 PP 文本回填或修改版面真值。
+- 路由不完整或归属含糊时只阻断当前页，并保留可审计 issue；不得静默整行 fallback 或修改版面真值。非空 CharOCR 正文不得由 PP/VL 替换、插入或重排；唯一几何绑定的文本分歧只保存为明确标源的候选。只有 EngCut 对已有拉丁 route 完全无输出时保留显式 PP word fallback。
 - 原 native adapter 临时 PP-VL row carrier 已删除；生产 runner 直接接收 `CharOcrInputRow`，厂商字典不再携带 layout UID、策略或 authorship 隐藏键。
 
 生产契约以 `routing-truth-contract.md` 和当前测试为准；`ocr-routing-experiment-conclusions-2026-07-09.md` 仅保存实验背景。

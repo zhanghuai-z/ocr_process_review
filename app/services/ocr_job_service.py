@@ -426,8 +426,12 @@ def _observation_records(
                         text=item.text,
                         confidence=item.confidence,
                         rank=rank,
-                        source=observed_atom.source,
-                        bbox=observed_atom.bbox,
+                        source=item.source or observed_atom.source,
+                        bbox=(
+                            item.bbox
+                            if item.bbox is not None
+                            else observed_atom.bbox
+                        ),
                     )
                     for rank, item in enumerate(observed_atom.candidates)
                 )

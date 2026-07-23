@@ -12,7 +12,7 @@
 | `RoutingObservationBundle` | OCR 路由观察层 | 否 | 将本次整页 PP 观察、当前范围 VL 观察、图像 hash 和版面 fingerprint 封装为同一运行范围。 |
 | `PageRoutingPlan` | 路由编译器 | 否 | 由当前快照和本次 prepass 导出的、页面级、一次性派生计划。 |
 | `OcrRoutingRunAudit` | 诊断审计 | 仅追加 | 持久化本次观察范围、精确对齐状态、路由摘要和失败原因，不参与业务决策。 |
-| CharOCR observation | Hanwang/EngCut/显式 PP token 策略输出 | 仅 OCR 写入链路 | 正文字、字符框、来源和审计标记。 |
+| CharOCR observation | Hanwang/EngCut/显式空结果 PP fallback 输出 | 仅 OCR 写入链路 | 正文字、字符框、来源和审计标记；唯一绑定的 PP/VL 文本分歧只可成为候选。 |
 
 `PageRoutingPlan` 不是布局真值，也不会写回 `LayoutSnapshot`、Paddle 原始响应或项目模型。计划无效只阻断对应页面的 CharOCR；不会猜测整块 crop 继续执行。
 
@@ -31,22 +31,23 @@
    - 含拉丁字母或数字：PP word box 只提供 token proposal，页面前景组件提供实际墨迹。每个完整组件只能有一个所有者；拉丁/数字 token 以 word 为单位生成 `text_latin` 路由，剩余墨迹仍属于同一物理行的 LineCut 输入。
    - 标点不是第三个 native 分支。拉丁 token 内的 ASCII 标点可以随 word 进入 EngCut；外部标点和中文标点留在 LineCut。原生探针已验证 EngCut 可逐字符返回 `[`、`]` 和 `/`。
    - PP 标点 token 的空白范围不得切伤相邻拉丁字形。只有与唯一拉丁所有者共享水平墨迹投影、且未被显式 LineCut 所有权占用的完整组件可以归还该拉丁 token；竞争归属保持未决。
-   - 可唯一恢复完整组件的独立标点可保留为 `PpOcrSymbolObservation`，用于对同一墨迹的 native observation 做确定性校正；它不是布局真值，也不能按文本邻近关系猜位置。
-   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本和组件 mask；当一个 EngCut group 与一个 PP token 通过中心几何唯一一对一绑定，且 EngCut 字符框重叠或文本不一致时，降级为带审计标记的 PP word observation。绑定不唯一时禁止替换。
+   - 可唯一恢复完整组件的独立标点可保留为 `PpOcrSymbolObservation`。CharOCR 已返回正文时，它只能在严格一对一绑定后成为带独立来源和 bbox 的 `OcrCandidate`；不得替换、插入或重排 native atom，也不能按文本邻近关系猜位置。
+   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本和组件 mask；当一个 EngCut group 与一个 PP token 通过中心几何唯一一对一绑定且等长但文本不一致时，EngCut 文本和字符框保持不变，PP 字符只作为明确标源的候选。绑定不唯一或长度不等时禁止建立逐字候选。
 7. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 Paddle 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
 8. 路由运行摘要以追加记录持久化；CharOCR 输出写入 OCR observation。公式文本仍由公式分支保有，不由 CharOCR 回填。
 
-EngCut 只处理已编译为 `text_latin` 的 crop。PP token fallback 只能读取 typed
-route 中与当前 group 唯一几何绑定的 observation；禁止恢复旧的全页文本搜索、模糊匹配或按字符串猜位置链路。
+EngCut 只处理已编译为 `text_latin` 的 crop。只有 EngCut 对一个已有拉丁 route
+完全无输出时，才允许采用该 typed route 自带的 PP 文本生成明确标源的 word
+fallback。非空 CharOCR 文本不得与 PP/VL 择优；禁止恢复旧的全页文本搜索、模糊匹配、整行静默回填或按字符串猜位置链路。
 
 路由 segment 的 `bbox` 是行内 mask/crop 几何；公式可另外保留完整布局框 `content_bbox`。`text_latin` 可携带只读 `ppocr_latin_tokens`，行还可携带 `PpOcrSymbolObservation`；它们都不是布局或校对真值。
 
 ## 已采纳的实验结论
 
 - 纯中文、纯英文/数字和混合行都必须先经过同一阶段的结构扣除；公式优先级高于文字分流。
-- PP-OCR word-box 默认承担几何 proposal；只有独立标点 observation 和唯一几何绑定的拉丁 word 降级结果可以产生明确标源的 OCR observation。
+- PP-OCR word-box 默认承担几何 proposal；唯一绑定的独立标点和等长拉丁文本分歧只能产生明确标源的 `OcrCandidate`，不能接管非空 CharOCR 正文。
 - PP-OCR 的拉丁 token 只能生成自己的 word mask；中文、外部标点和 token 外区域属于 LineCut。独立标点 observation 只提供文本与组件证据，不成为第三个 native 分支。
-- PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。当前不使用“整行回退”“PP-OCR 文本回填”或静默猜测。
+- PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。除 EngCut 空结果的显式 route-local word fallback 外，当前不使用整行回退、PP 文本回填或静默猜测。
 - 深色底白字和表格横线属于同一连通域分流算法的输入场景，不建立页面类型特判。
 - PP token proposal 与黏连组件存在交集时可生成受限片段。除上述两种显式 observation 外，片段仍只是本次路由 mask。
 - 路由失败只阻断对应页面；同批其他页面可继续。失败页必须保留可审计 issue，不能退回整块 OCR。

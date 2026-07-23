@@ -76,7 +76,6 @@ SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
 DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE = "ppocrv6:latin_token_text_alignment"
-PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX = ":ppocr_text_disagreement"
 PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG = "latin_token_text_disagreement"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
@@ -106,6 +105,7 @@ class _NativeAtomResult:
     bbox: tuple[int, int, int, int] | None = None
     candidates: list[str] = field(default_factory=list)
     candidate_confidences: list[float] = field(default_factory=list)
+    external_candidates: list[CharOcrCandidateObservation] = field(default_factory=list)
     source: str = "hanwang:micro_recblock"
     bbox_granularity: str = ""
     token_text: str = ""
@@ -172,6 +172,15 @@ class _NativeRegionResult:
                             "confidence": char.confidence,
                             "bbox": list(char.bbox) if char.bbox else None,
                             "candidates": list(char.candidates),
+                            "external_candidates": [
+                                {
+                                    "text": candidate.text,
+                                    "confidence": candidate.confidence,
+                                    "source": candidate.source,
+                                    "bbox": list(candidate.bbox) if candidate.bbox else None,
+                                }
+                                for candidate in char.external_candidates
+                            ],
                             "source": char.source,
                             "bbox_granularity": char.bbox_granularity,
                             "token_text": char.token_text,
@@ -213,6 +222,10 @@ class RunStats:
     geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
     latin_token_text_disagreements: int = 0
+    ppocr_symbol_observations_bound: int = 0
+    ppocr_symbol_observations_unbound: int = 0
+    vl_marker_observations_bound: int = 0
+    vl_marker_observations_unbound: int = 0
 
 
 @dataclass
@@ -543,58 +556,52 @@ def _merge_physical_routing_line(
     )]
 
 
-def _reconcile_ppocr_symbol_observations(
+def _attach_ppocr_symbol_candidates(
     lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation, ...],
-) -> list[_NativeLineResult]:
-    """Apply typed PP symbol ownership to native output for the same ink.
-
-    PP supplies the symbol identity and token cell; foreground analysis
-    supplies its exact geometry. Native characters are replaced only when
-    their center is inside that cell and their geometry intersects the owned
-    foreground. This also handles a fully omitted native symbol without
-    guessing from neighboring text.
-    """
-    return _reconcile_owned_text_observations(
+) -> tuple[list[_NativeLineResult], int, int]:
+    """Retain a uniquely bound PP symbol as a non-authoritative candidate."""
+    return _attach_owned_text_candidates(
         lines,
         observations,
         source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
     )
 
 
-def _reconcile_vl_marker_observations(
+def _attach_vl_marker_candidates(
     lines: list[_NativeLineResult],
     observations: tuple[VlSemanticMarkerObservation, ...],
-) -> list[_NativeLineResult]:
-    """Bind explicit VL marker identity to its measured LineCut geometry."""
-    return _reconcile_owned_text_observations(
+) -> tuple[list[_NativeLineResult], int, int]:
+    """Retain a uniquely bound VL marker as a non-authoritative candidate."""
+    return _attach_owned_text_candidates(
         lines,
         observations,
         source=VL_SEMANTIC_MARKER_SOURCE,
     )
 
 
-def _reconcile_owned_text_observations(
+def _attach_owned_text_candidates(
     lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation | VlSemanticMarkerObservation, ...],
     *,
     source: str,
-) -> list[_NativeLineResult]:
+) -> tuple[list[_NativeLineResult], int, int]:
     if not lines or not observations:
-        return lines
-    resolved = list(lines)
+        return lines, 0, len(observations)
+    bound = 0
+    unbound = 0
     for observation in sorted(observations, key=lambda item: (item.bbox[0], item.bbox[1])):
         center_x, center_y = _bbox_center(observation.bbox)
         owners = [
             index
-            for index, line in enumerate(resolved)
+            for index, line in enumerate(lines)
             if line.bbox[0] <= center_x < line.bbox[2]
             and line.bbox[1] <= center_y < line.bbox[3]
         ]
         if len(owners) != 1:
+            unbound += 1
             continue
-        line_index = owners[0]
-        line = resolved[line_index]
+        line = lines[owners[0]]
         claimed = [
             index
             for index, char in enumerate(line.chars)
@@ -602,70 +609,42 @@ def _reconcile_owned_text_observations(
             and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
         ]
-        observed_char = _NativeAtomResult(
+        if len(claimed) != 1:
+            unbound += 1
+            continue
+        bound += 1
+        char = line.chars[claimed[0]]
+        if char.text == observation.text:
+            continue
+        candidate = CharOcrCandidateObservation(
             text=observation.text,
             confidence=0.0,
-            bbox=observation.bbox,
-            candidates=[observation.text],
             source=source,
-            bbox_granularity="char" if len(observation.text) == 1 else "word",
-            token_text=observation.text,
+            bbox=observation.bbox,
         )
-        if claimed:
-            insertion = claimed[0]
-            claimed_set = set(claimed)
-            chars = [char for index, char in enumerate(line.chars) if index not in claimed_set]
-        else:
-            insertion = len(line.chars)
-            chars = list(line.chars)
-            for index, char in enumerate(chars):
-                if char.bbox is None:
-                    continue
-                if _bbox_center(char.bbox)[0] > center_x:
-                    insertion = index
-                    break
-
-        additions: list[_NativeAtomResult] = []
-        leading_space = isinstance(observation, PpOcrSymbolObservation) and observation.leading_space
-        trailing_space = isinstance(observation, PpOcrSymbolObservation) and observation.trailing_space
-        if leading_space and (
-            insertion == 0 or chars[insertion - 1].text != " "
-        ):
-            additions.append(_ppocr_symbol_space())
-        additions.append(observed_char)
-        if trailing_space and (
-            insertion >= len(chars) or chars[insertion].text != " "
-        ):
-            additions.append(_ppocr_symbol_space())
-        chars[insertion:insertion] = additions
-        resolved[line_index] = replace(
-            line,
-            text="".join(char.text for char in chars),
-            chars=chars,
-        )
-    return resolved
+        if candidate not in char.external_candidates:
+            char.external_candidates.append(candidate)
+    return lines, bound, unbound
 
 
-def _reconcile_route_observations(
+def _attach_route_observation_candidates(
     lines: list[_NativeLineResult],
     route: RoutingLine,
+    stats: RunStats,
 ) -> list[_NativeLineResult]:
-    return _reconcile_vl_marker_observations(
-        _reconcile_ppocr_symbol_observations(lines, route.ppocr_symbol_observations),
+    lines, pp_bound, pp_unbound = _attach_ppocr_symbol_candidates(
+        lines,
+        route.ppocr_symbol_observations,
+    )
+    lines, vl_bound, vl_unbound = _attach_vl_marker_candidates(
+        lines,
         route.vl_marker_observations,
     )
-
-
-def _ppocr_symbol_space() -> _NativeAtomResult:
-    return _NativeAtomResult(
-        text=" ",
-        confidence=0.0,
-        bbox=None,
-        candidates=[" "],
-        source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
-        bbox_granularity="space",
-        token_text=" ",
-    )
+    stats.ppocr_symbol_observations_bound += pp_bound
+    stats.ppocr_symbol_observations_unbound += pp_unbound
+    stats.vl_marker_observations_bound += vl_bound
+    stats.vl_marker_observations_unbound += vl_unbound
+    return lines
 
 
 def _distribute_linecut_results(
@@ -806,6 +785,7 @@ def _assemble_layout_route_line(
     line_idx: int,
     route: RoutingLine,
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
+    stats: RunStats,
 ) -> list[_NativeLineResult]:
     segments = route.segments
     if not segments:
@@ -849,12 +829,13 @@ def _assemble_layout_route_line(
         merged_text_lines: list[_NativeLineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _reconcile_route_observations(
+        return _attach_route_observation_candidates(
             _merge_physical_routing_line(
                 merged_text_lines,
                 route_bbox=route.bbox,
             ),
             route,
+            stats,
         )
 
     clusters = _cluster_lines_by_shape(all_text_lines)
@@ -943,7 +924,7 @@ def _assemble_layout_route_line(
                 review_flags=sorted(flags),
             )
         )
-    return _reconcile_route_observations(assembled, route)
+    return _attach_route_observation_candidates(assembled, route, stats)
 
 
 def _assemble_routing_lines(
@@ -951,6 +932,7 @@ def _assemble_routing_lines(
     block_idx: int,
     line_routes: tuple[RoutingLine, ...],
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
+    stats: RunStats,
 ) -> list[_NativeLineResult]:
     if not line_routes:
         return []
@@ -962,6 +944,7 @@ def _assemble_routing_lines(
                 line_idx=line_idx,
                 route=route,
                 grouped_lines=grouped_lines,
+                stats=stats,
             )
         )
     assembled.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
@@ -1303,6 +1286,7 @@ def _offset_line_results(
                     bbox=bbox,
                     candidates=list(char.candidates),
                     candidate_confidences=list(char.candidate_confidences),
+                    external_candidates=list(char.external_candidates),
                     source=char.source,
                     bbox_granularity=char.bbox_granularity,
                     token_text=char.token_text,
@@ -1352,6 +1336,7 @@ def _rescale_line_results(
                 bbox=rescale_bbox(char.bbox) if char.bbox is not None else None,
                 candidates=list(char.candidates),
                 candidate_confidences=list(char.candidate_confidences),
+                external_candidates=list(char.external_candidates),
                 source=char.source,
                 bbox_granularity=char.bbox_granularity,
                 token_text=char.token_text,
@@ -1698,7 +1683,7 @@ def _engcut_route_line_text_and_chars(
     *,
     source: str = LATIN_ENGCUT_ROUTE_SOURCE,
     ppocr_tokens: tuple[PpOcrLatinTokenObservation, ...] = (),
-) -> tuple[str, list[_NativeAtomResult]]:
+) -> tuple[str, list[_NativeAtomResult], bool]:
     text_parts: list[str] = []
     results: list[_NativeAtomResult] = []
     has_output_group = False
@@ -1707,6 +1692,7 @@ def _engcut_route_line_text_and_chars(
         for group in _engcut_groups(chars)
         if (visible := [char for char in group if str(char.text or "")])
     ]
+    has_ppocr_text_disagreement = False
     token_bindings = [
         _ppocr_token_for_engcut_group(group, ppocr_tokens)
         for group in visible_groups
@@ -1732,53 +1718,51 @@ def _engcut_route_line_text_and_chars(
             )
         group_text = "".join(str(char.text or "") for char in visible)
         has_output_group = True
-        can_align_ppocr_text = (
+        can_bind_ppocr_candidates = (
             token is not None
             and token_binding_counts.get(token) == 1
             and group_text != token.text
             and len(visible) == len(token.text)
             and all(len(str(char.text or "")) == 1 for char in visible)
         )
-        if can_align_ppocr_text:
+        if token is not None and token_binding_counts.get(token) == 1 and group_text != token.text:
+            has_ppocr_text_disagreement = True
+        if can_bind_ppocr_candidates:
             assert token is not None
-            text_parts.append(token.text)
+            text_parts.append(group_text)
             results.extend(
                 _NativeAtomResult(
-                    text=aligned_text,
+                    text=str(native_char.text or ""),
                     confidence=0.0,
                     bbox=native_char.bbox,
-                    candidates=list(dict.fromkeys([
-                        str(native_char.text or ""),
-                        aligned_text,
-                    ])),
-                    source=PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE,
+                    candidates=[str(native_char.text or "")],
+                    external_candidates=[CharOcrCandidateObservation(
+                        text=aligned_text,
+                        confidence=0.0,
+                        source=PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE,
+                        bbox=token.bbox,
+                    )],
+                    source=source,
                     bbox_granularity="char",
-                    token_text=aligned_text,
+                    token_text=str(native_char.text or ""),
                 )
                 for native_char, aligned_text in zip(visible, token.text)
             )
             continue
         text_parts.append(group_text)
-        result_source = source
-        if (
-            token is not None
-            and token_binding_counts.get(token) == 1
-            and group_text != token.text
-        ):
-            result_source = f"{source}{PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX}"
         results.extend(
             _NativeAtomResult(
                 text=str(char.text or ""),
                 confidence=0.0,
                 bbox=char.bbox,
                 candidates=[str(char.text or "")],
-                source=result_source,
+                source=source,
                 bbox_granularity="char",
                 token_text=str(char.text or ""),
             )
             for char in visible
         )
-    return "".join(text_parts), results
+    return "".join(text_parts), results, has_ppocr_text_disagreement
 
 
 def _ppocr_token_for_engcut_group(
@@ -1995,7 +1979,7 @@ def _recognize_engcut_masked_line(
             raise RuntimeError(f"EngCut received a non-Latin route: {segment.kind!r}")
         chars = grouped_by_route[segment.key]
         source = LATIN_ENGCUT_ROUTE_SOURCE
-        text, char_results = _engcut_route_line_text_and_chars(
+        text, char_results, has_token_disagreement = _engcut_route_line_text_and_chars(
             chars,
             source=source,
             ppocr_tokens=segment.ppocr_latin_tokens,
@@ -2028,11 +2012,7 @@ def _recognize_engcut_masked_line(
             )
             continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
-        token_disagreement_count = sum(
-            char.source.endswith(PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX)
-            for char in char_results
-        )
-        if token_disagreement_count:
+        if has_token_disagreement:
             stats.latin_token_text_disagreements += 1
         results[segment.key] = _NativeLineResult(
             text=text,
@@ -2043,7 +2023,7 @@ def _recognize_engcut_masked_line(
             bbox_source="text_latin_masked_line_engcut",
             review_flags=(
                 [PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG]
-                if token_disagreement_count
+                if has_token_disagreement
                 else []
             ),
         )
@@ -2931,6 +2911,7 @@ def run_micro_recblock(
                 block_idx=block_idx,
                 line_routes=native_line_routes,
                 grouped_lines=grouped_lines,
+                stats=stats,
             )
             _normalize_digitlike_numeric_context_lines(lines)
             hw_text = "".join(line.text for line in lines).strip()
@@ -3037,7 +3018,7 @@ def _observation_candidates(
     texts = list(atom.candidates)
     if not texts and atom.text:
         texts = [atom.text]
-    return tuple(
+    native_candidates = tuple(
         CharOcrCandidateObservation(
             text=text,
             confidence=(
@@ -3048,6 +3029,7 @@ def _observation_candidates(
         )
         for index, text in enumerate(texts)
     )
+    return (*native_candidates, *atom.external_candidates)
 
 
 def _native_line_observation(line: _NativeLineResult) -> CharOcrLineObservation:
