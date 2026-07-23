@@ -9,10 +9,10 @@
 ## 当前基线
 
 - 分支：`refactor-remove-runtime-projection`
-- 基线提交：`04b1498 Audit and optimize proof UI interactions`
-- 该分支当前领先远端 32 个提交。
+- 本轮研究起始基线：`2620f29 fix: use routed foreground for degraded words`
+- 本轮研究开始时，该分支领先远端 45 个提交。
 - 工作区包含大量用户样例、实验脚本、未跟踪文件和已删除的旧报告。不要批量清理、恢复或提交它们。
-- 最近完整回归：`311 passed in 22.34s`。
+- 最近完整回归：`344 passed in 19.65s`。
 
 开始工作前执行：
 
@@ -81,6 +81,18 @@ python -m pytest -q
 - 原 native adapter 临时 PP-VL row carrier 已删除；生产 runner 直接接收 `CharOcrInputRow`，厂商字典不再携带 layout UID、策略或 authorship 隐藏键。
 
 生产契约以 `routing-truth-contract.md` 和当前测试为准；`ocr-routing-experiment-conclusions-2026-07-09.md` 仅保存实验背景。
+
+### 斜体 token 退级研究（诊断阶段）
+
+`scripts/audit_italic_token_fallback.py` 是离线诊断入口，只读取 `test3.ocrproj`、缓存 Layout/PP-OCR observation 和 `file/1`、`file/2` 样例；它在进程内捕获现有路由与 EngCut 输出，结束时恢复 monkeypatch，不提交 OCR、不保存项目，也不被生产代码引用。
+
+- 已从代码和回放确认：当前生产“EngCut 有输出但字符几何退化”的 word 退级触发器仍只有同组相邻字符 bbox 的严格横向重叠；EngCut 完全无输出是另一条既有显式 fallback。重叠判据能处理已有重叠退级，但不能发现 `Unbalanced -> Unbalan,ced`、`Finance -> Financce`、`Incentives -> Irtcentives` 这类“没有 bbox 重叠、一个前景组件却被多个字符框切分”的退化。
+- 已从 2026-07-23 全量诊断确认：`test3` 连续 3 次输出稳定；`file/1` 与 `file/2` 共 111 页中 108 页完成、3 页复现既有生产阻断（`120193.tif`、`120196.tif`、`T00036_00.jpg`），成功页采集 3377 个单 PP token。当前规则产生 121 个 word fallback；诊断阈值 conservative/balanced/broad 分别会产生 332/401/1224 个。
+- 已从回显图确认：前景组件切分比例能覆盖上述目标斜体碎框，但也会命中正常数字和部分正常拉丁词。因此三个扩大策略都只是对比样本，当前证据不足以选择生产阈值；旧斜率分桶也不能单独作为斜体判据。
+- 已从代码和回放确认：`Growth:`、`Governments:` 一类问题是 PP 独立标点被拉丁 route 的矩形包络吞入，属于符号所有权冲突，不得借 word fallback 静默吸收。诊断对所有候选策略都返回 `routing_symbol_conflict`。
+- 尚未实施：没有修改 OCR 路由、EngCut 退级、atom 文本/几何、Proof 或持久化。生产实现前仍需获得可区分目标碎框与正常字框的判据，并单独研究独立标点所有权。
+
+完整 JSON 和四联回显图位于 `D:\project\ocr_process\worktrees\coord\debug\italic_token_fallback_study_20260723`；该目录是诊断产物，不是生产依赖或权威事实。
 
 ## 校对心智
 
