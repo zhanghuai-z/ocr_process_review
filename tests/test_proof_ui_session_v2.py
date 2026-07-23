@@ -457,6 +457,7 @@ def test_hproof_shrinks_overflowing_glyph_to_atom_without_clipping(
     assert fitted_font.pixelSize() < base_font.pixelSize()
     assert QFontMetrics(fitted_font).tightBoundingRect("一").width() <= 4
     assert _fit_glyph_font("i", base_font, 20.0).pixelSize() == 28
+    assert _fit_glyph_font("j", base_font, 2.0).pixelSize() == 28
 
     def render(text: str) -> QImage:
         editor = _SlotLineEditor()

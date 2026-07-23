@@ -232,9 +232,14 @@ def _slot_visual_width(text_char: str, font_metrics: QFontMetrics) -> float:
 
 
 def _fit_glyph_font(text_char: str, font: QFont, max_ink_width: float) -> QFont:
-    """Shrink one overflowing glyph to its atom width without clipping it."""
+    """Shrink an overflowing full-width glyph without distorting Latin text."""
 
     fitted = QFont(font)
+    if not text_char or any(
+        unicodedata.east_asian_width(ch) not in ("W", "F")
+        for ch in text_char
+    ):
+        return fitted
     available = max(1, int(max_ink_width))
     metrics = QFontMetrics(fitted)
     ink_width = metrics.tightBoundingRect(text_char).width()
