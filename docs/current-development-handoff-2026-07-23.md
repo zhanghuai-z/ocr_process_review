@@ -77,7 +77,7 @@ python -m pytest -q
 - 公式、表格、图片和装饰所有权先于文本分流；表格和图片不进入普通文本路由。
 - 拉丁字母与数字进入 EngCut；剩余中文及其上下文符号进入 LineCut。
 - 混合行是物理行状态，不是一个 `text_mixed` 目标。它应在 CharOCR 前拆为有明确所有权的 segment。
-- 路由不完整或归属含糊时只阻断当前页，并保留可审计 issue；不得静默整行 fallback 或修改版面真值。单字符拉丁 token 的残缺墨迹仅在第二组件满足同字形几何约束且候选唯一时补全，否则以 `incomplete_single_latin_token_ink` 阻断当前页。CharOCR 几何可靠时，非空正文不得由 PP/VL 替换或重排，唯一几何绑定的文本分歧只保存为明确标源的候选；EngCut native group 内字符 bbox 重叠时，字符几何与文本同时降级，仅允许唯一 PP word token 聚合自身连续 native groups，并以 PP 文本和 bbox 生成一次明确标源的 word atom，无唯一 token 或 groups 穿插则阻断。若一个完整组件 PP 独立标点 observation 唯一归属一条物理行、且与任何 native atom 均不相交，可按几何顺序创建明确标源的缺失符号 atom。候选绑定、缺失 atom 插入和未绑定使用不同运行计数；插入 atom 的来源与 bbox 进入 OCR observation，执行期行 review flag 当前不写入 `OcrLine`。EngCut 对已有拉丁 route 完全无输出时仍保留显式 PP word fallback。
+- 路由不完整或归属含糊时只阻断当前页，并保留可审计 issue；不得静默整行 fallback 或修改版面真值。单字符拉丁 token 的残缺墨迹仅在第二组件满足同字形几何约束且候选唯一时补全，否则以 `incomplete_single_latin_token_ink` 阻断当前页。CharOCR 几何可靠时，非空正文不得由 PP/VL 替换或重排，唯一几何绑定的文本分歧只保存为明确标源的候选；EngCut native group 内字符 bbox 重叠时，字符几何与文本同时降级，仅允许恰有一个 PP word token 且已有唯一前景所有权 route bbox 的 segment 聚合自身连续 native groups，并以 PP 文本和 route 前景闭合 bbox 生成一次明确标源的 word atom。PP 原始 word bbox 仍是只读 observation；无唯一 token、无前景闭合几何或 groups 穿插则阻断。若一个完整组件 PP 独立标点 observation 唯一归属一条物理行、且与任何 native atom 均不相交，可按几何顺序创建明确标源的缺失符号 atom。候选绑定、缺失 atom 插入和未绑定使用不同运行计数；插入 atom 的来源与 bbox 进入 OCR observation，执行期行 review flag 当前不写入 `OcrLine`。EngCut 对已有拉丁 route 完全无输出时仍保留显式 PP word fallback。
 - 原 native adapter 临时 PP-VL row carrier 已删除；生产 runner 直接接收 `CharOcrInputRow`，厂商字典不再携带 layout UID、策略或 authorship 隐藏键。
 
 生产契约以 `routing-truth-contract.md` 和当前测试为准；`ocr-routing-experiment-conclusions-2026-07-09.md` 仅保存实验背景。

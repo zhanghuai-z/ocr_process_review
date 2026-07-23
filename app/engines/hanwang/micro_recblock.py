@@ -77,7 +77,9 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE = "ppocrv6:latin_token_text_alignment"
 PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG = "latin_token_text_disagreement"
-PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE = "ppocrv6:latin_token_geometry_fallback"
+PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE = (
+    "ppocrv6:latin_token_text_route_foreground_geometry"
+)
 PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG = "latin_token_geometry_fallback"
 ENGCUT_DEGRADED_NATIVE_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_observation"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
@@ -1764,6 +1766,7 @@ def _engcut_route_line_text_and_chars(
     *,
     source: str = LATIN_ENGCUT_ROUTE_SOURCE,
     ppocr_tokens: tuple[PpOcrLatinTokenObservation, ...] = (),
+    foreground_word_bbox: tuple[int, int, int, int] | None = None,
 ) -> tuple[str, list[_NativeAtomResult], bool]:
     text_parts: list[str] = []
     results: list[_NativeAtomResult] = []
@@ -1808,6 +1811,11 @@ def _engcut_route_line_text_and_chars(
     for visible, token in zip(visible_groups, token_bindings):
         if token in degraded_tokens:
             assert token is not None
+            if len(ppocr_tokens) != 1 or foreground_word_bbox is None:
+                raise RuntimeError(
+                    "EngCut degraded word requires one PP token with uniquely owned "
+                    "route foreground geometry"
+                )
             if token in emitted_degraded_tokens:
                 continue
             if has_output_group:
@@ -1831,7 +1839,7 @@ def _engcut_route_line_text_and_chars(
             results.append(_NativeAtomResult(
                 text=token.text,
                 confidence=0.0,
-                bbox=token.bbox,
+                bbox=foreground_word_bbox,
                 candidates=[token.text],
                 external_candidates=[CharOcrCandidateObservation(
                     text=native_text,
@@ -2142,6 +2150,9 @@ def _recognize_engcut_masked_line(
             chars,
             source=source,
             ppocr_tokens=segment.ppocr_latin_tokens,
+            foreground_word_bbox=(
+                segment.bbox if len(segment.ppocr_latin_tokens) == 1 else None
+            ),
         )
         if not text or not any(char.text.strip() for char in char_results):
             fallback_text = str(segment.ppocr_latin_fallback_text or "").strip()
@@ -2189,7 +2200,7 @@ def _recognize_engcut_masked_line(
             confidence=0.0,
             chars=char_results,
             source=(
-                f"{source}+ppocrv6_token_geometry_fallback"
+                f"{source}+ppocrv6_token_text_route_foreground_geometry"
                 if token_geometry_fallback_count
                 else source
             ),
