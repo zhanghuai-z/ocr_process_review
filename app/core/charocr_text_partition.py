@@ -58,9 +58,9 @@ def partition_charocr_text_region(
 
     CJK-only rows remain one LineCut route. Rows containing Latin or digits use
     PP-OCR word boxes as EngCut mask proposals, including otherwise pure Latin
-    rows. Component closure may repair a word-box edge, but ink anchored by any
-    other PP-OCR token cannot enter a Latin mask. Everything outside those
-    masks remains a LineCut region.
+    rows. Component closure may repair a word-box edge, but ink anchored by
+    another PP-OCR token center cannot enter a Latin mask. Everything outside
+    those masks remains a LineCut region.
     """
     text = str(prepass_line.text or "")
     if not _has_latin_or_digit(text):
@@ -141,14 +141,14 @@ def partition_charocr_text_region(
     if not latin_tokens:
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox),))
 
-    component_owners = _component_owner_token_indices(
+    component_owners, ownership_diagnostics = _component_owner_token_indices(
         components,
         tokens,
         region_bbox,
         linecut_owned_bboxes=linecut_owned_bboxes,
     )
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
-    diagnostics: list[RoutePartitionDiagnostic] = []
+    diagnostics = list(ownership_diagnostics)
     for token in latin_tokens:
         mask_bbox = _latin_mask_bbox(
             components,
@@ -340,7 +340,10 @@ def _component_owner_token_indices(
     region_bbox: XYXY,
     *,
     linecut_owned_bboxes: tuple[XYXY, ...],
-) -> dict[ForegroundComponent, int | None]:
+) -> tuple[
+    dict[ForegroundComponent, int | None],
+    tuple[RoutePartitionDiagnostic, ...],
+]:
     """Assign components once by ordered PP token ownership cells.
 
     Cell boundaries are observations derived from adjacent PP boxes. A
@@ -353,7 +356,7 @@ def _component_owner_token_indices(
         if str(token.text or "").strip()
     )
     if not ordered:
-        return {component: None for component in components}
+        return {component: None for component in components}, ()
     boundaries = [region_bbox[0]]
     for left, right in zip(ordered, ordered[1:]):
         boundaries.append((left.bbox[2] + right.bbox[0]) / 2.0)
@@ -457,6 +460,15 @@ def _component_owner_token_indices(
         owners,
         linecut_owned_components=linecut_owned_components,
     )
+    completion_diagnostics = _complete_single_latin_token_components(
+        components,
+        ordered,
+        owners,
+        region_bbox,
+        center_owned_components=center_owned_components,
+        linecut_owned_components=linecut_owned_components,
+        ambiguous_components=ambiguous_components,
+    )
 
     # If a non-symbol token is empty, a unique component intersecting its raw
     # PP observation is the only additional ownership fact available. Multiple
@@ -483,7 +495,7 @@ def _component_owner_token_indices(
         ]
         if len(candidates) == 1:
             owners[candidates[0]] = token.token_index
-    return owners
+    return owners, completion_diagnostics
 
 
 def _reclaim_latin_glyph_parts(
@@ -540,6 +552,95 @@ def _shares_horizontal_ink(
     right: ForegroundComponent,
 ) -> bool:
     return max(left.bbox[0], right.bbox[0]) < min(left.bbox[2], right.bbox[2])
+
+
+def _complete_single_latin_token_components(
+    components: list[ForegroundComponent],
+    tokens: tuple[PpOcrV6WordBox, ...],
+    owners: dict[ForegroundComponent, int | None],
+    region_bbox: XYXY,
+    *,
+    center_owned_components: set[ForegroundComponent],
+    linecut_owned_components: set[ForegroundComponent],
+    ambiguous_components: set[ForegroundComponent],
+) -> tuple[RoutePartitionDiagnostic, ...]:
+    """Complete one PP single-character token before its EngCut mask is built.
+
+    A tiny owned component can be the detached dot of an italic glyph while
+    the stem was assigned only by a midpoint cell. A unique weak component
+    intersecting the same PP proposal may complete that token. Strong token
+    centers, explicit LineCut ownership, symbols, and competing Latin claims
+    remain untouched.
+    """
+
+    token_by_index = {token.token_index: token for token in tokens}
+    latin_tokens = tuple(
+        token
+        for token in tokens
+        if _token_branch(token.text) == "latin"
+    )
+    diagnostics: list[RoutePartitionDiagnostic] = []
+    for token in latin_tokens:
+        if len(str(token.text or "").strip()) != 1:
+            continue
+        anchors = [
+            component
+            for component in components
+            if owners.get(component) == token.token_index
+        ]
+        if not anchors:
+            continue
+        proposal_bbox = _clip(token.bbox, region_bbox)
+        proposal_height = proposal_bbox[3] - proposal_bbox[1]
+        anchor_bbox = _union([component.bbox for component in anchors])
+        anchor_height = anchor_bbox[3] - anchor_bbox[1]
+        if proposal_height <= 0 or anchor_height * 3 >= proposal_height:
+            continue
+
+        candidates: list[ForegroundComponent] = []
+        for component in components:
+            if component in anchors:
+                continue
+            if component in center_owned_components:
+                continue
+            if component in linecut_owned_components:
+                continue
+            if component in ambiguous_components:
+                continue
+            if _intersect(component.bbox, proposal_bbox) is None:
+                continue
+            current_owner = owners.get(component)
+            if current_owner is not None:
+                owner_token = token_by_index.get(current_owner)
+                if owner_token is None:
+                    continue
+                if _token_branch(owner_token.text) in {"latin", "symbol"}:
+                    continue
+            latin_claims = [
+                candidate.token_index
+                for candidate in latin_tokens
+                if _intersect(component.bbox, _clip(candidate.bbox, region_bbox)) is not None
+            ]
+            if latin_claims != [token.token_index]:
+                continue
+            completed_bbox = _union([anchor_bbox, component.bbox])
+            if completed_bbox[3] - completed_bbox[1] < proposal_height / 2.0:
+                continue
+            candidates.append(component)
+
+        if len(candidates) == 1:
+            owners[candidates[0]] = token.token_index
+            continue
+        diagnostics.append(RoutePartitionDiagnostic(
+            code="incomplete_single_latin_token_ink",
+            message=(
+                "PP-OCRv6 single-character token owns only a small foreground "
+                "fragment and cannot be completed uniquely: "
+                f"{token.text!r} candidates={len(candidates)}"
+            ),
+            bbox=proposal_bbox,
+        ))
+    return tuple(diagnostics)
 
 
 def _has_visible_ink(

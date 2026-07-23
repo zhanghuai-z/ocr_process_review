@@ -135,6 +135,68 @@ def test_latin_descender_is_not_split_by_trailing_space_in_symbol_token():
     ]
 
 
+def test_single_latin_token_reclaims_italic_j_stem_from_weak_cjk_cell_owner():
+    image = _image()
+    _ink(image, (10, 8, 30, 42))       # preceding CJK
+    _ink(image, (48, 18, 61, 43))      # italic j stem, weakly in the CJK cell
+    _ink(image, (62, 8, 67, 13))       # italic j dot, owned by the j center
+    _ink(image, (85, 8, 105, 42))      # following CJK
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="业j的",
+        bbox=(0, 0, 120, 50),
+        words=(
+            PpOcrV6WordBox(0, 0, "业", (8, 6, 60, 44)),
+            PpOcrV6WordBox(0, 1, "j", (58, 6, 72, 44)),
+            PpOcrV6WordBox(0, 2, "的", (82, 6, 108, 44)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    assert result.diagnostics == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((48, 8, 67, 43), "j"),
+    ]
+    assert [
+        (token.text, token.bbox)
+        for segment in latin
+        for token in segment.ppocr_latin_tokens
+    ] == [("j", (58, 6, 72, 44))]
+
+
+def test_single_latin_token_does_not_guess_between_competing_stem_components():
+    image = _image()
+    _ink(image, (10, 8, 30, 42))
+    _ink(image, (48, 18, 61, 28))      # first possible continuation
+    _ink(image, (48, 32, 61, 43))      # second possible continuation
+    _ink(image, (62, 8, 67, 13))       # only strongly owned j fragment
+    _ink(image, (85, 8, 105, 42))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="业j的",
+        bbox=(0, 0, 120, 50),
+        words=(
+            PpOcrV6WordBox(0, 0, "业", (8, 6, 60, 44)),
+            PpOcrV6WordBox(0, 1, "j", (58, 6, 72, 44)),
+            PpOcrV6WordBox(0, 2, "的", (82, 6, 108, 44)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((62, 8, 67, 13), "j"),
+    ]
+    assert [item.code for item in result.diagnostics] == [
+        "incomplete_single_latin_token_ink",
+    ]
+
+
 def test_latin_stem_is_not_split_by_preceding_period_space_token():
     image = _image()
     _ink(image, (8, 24, 14, 30))       # period
