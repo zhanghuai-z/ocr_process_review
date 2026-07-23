@@ -90,15 +90,16 @@ python -m pytest -q
 
 - 以 OCR 行为工作单位，对照原稿行图与 proof 文本。
 - 中文、英文、数字、标点、表格和公式通过 atom/view 表达。
+- `granularity="word"` 的 atom 以完整 bbox 和文本范围生成一个 word overlay；横校不推断词内字符位置，单击选择整词，双击编辑整词范围。char atom 仍保持逐字槽位。
 - 行内公式使用气泡编辑；独立公式使用原稿、渲染结果、源码三栏。
 - 公式序号是可丢弃的软链接，不合并两个 OCR/proof 事实。
 
 ### 纵校
 
-- 字符索引顺序为：汉字、字母、数字、标点/其他。
-- “字符索引”表示不同字符集合；“相同字索引”表示当前字符在项目中的实例。
+- 字符/词索引顺序为：汉字、字母、数字、标点/其他；多字符 word atom 作为一个词项参与字母组，不拆成无框字符项。
+- “字符/词索引”表示不同校对文本 occurrence 集合；右侧索引表示当前字符或词在项目中的实例。
 - 每个实例通过稳定 UID、page、line/text unit、bbox 和 crop 元数据引用上下文，不持有独立文本副本。
-- OCR 文本上下文按整页呈现并高亮当前字符；原稿图同样由 page+bbox 定位。
+- OCR 文本上下文按整页呈现并高亮当前字符或词；原稿图同样由 page+bbox 定位。word occurrence 替换其显式 `[char_index, char_end)` 范围。
 - 修改最终提交到共享 `ProofTextUnit`，横校和纵校随后读取同一新工作区。
 
 当前实现边界：`ProofWorkspaceView` 是一次性只读投影；HProof/VProof 只持有焦点、选择和未提交 editor 状态；所有修改通过 `ProofSessionService` 的 CAS 命令提交。不得恢复旧 `Page/Line` 直接修改、panel bus、`merge_pages()` 或 stale-editor 补丁链。

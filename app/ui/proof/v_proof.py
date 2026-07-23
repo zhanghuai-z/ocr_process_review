@@ -89,8 +89,14 @@ class _SceneBBox:
     h: int
 
 
-def _entry_key(entry: ProofCharView) -> tuple[str, str, int, str | None]:
-    return (entry.proof_uid, entry.text_unit_uid, entry.char_index, entry.atom_uid)
+def _entry_key(entry: ProofCharView) -> tuple[str, str, int, int, str | None]:
+    return (
+        entry.proof_uid,
+        entry.text_unit_uid,
+        entry.char_index,
+        entry.char_end,
+        entry.atom_uid,
+    )
 
 
 def _char_index_group(text: str) -> int:
@@ -376,7 +382,7 @@ class VProofPanel(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(12, 12, 12, 12)
         left_header = QHBoxLayout()
-        left_title = QLabel("字符索引")
+        left_title = QLabel("字符/词索引")
         left_title.setObjectName("sectionTitle")
         left_header.addWidget(left_title)
         left_header.addStretch(1)
@@ -385,7 +391,7 @@ class VProofPanel(QWidget):
         left_header.addWidget(self._char_count)
         left_layout.addLayout(left_header)
         self._char_search = QLineEdit()
-        self._char_search.setPlaceholderText("搜索字符…")
+        self._char_search.setPlaceholderText("搜索字符或词…")
         self._char_search.textChanged.connect(self._rebuild_char_list)
         left_layout.addWidget(self._char_search)
         self._char_list = QListWidget()
@@ -416,7 +422,7 @@ class VProofPanel(QWidget):
         gallery_layout = QVBoxLayout(gallery_card)
         gallery_layout.setContentsMargins(10, 8, 10, 10)
         gallery_header = QHBoxLayout()
-        self._gallery_header = QLabel("相同字索引")
+        self._gallery_header = QLabel("相同字符/词索引")
         self._gallery_header.setObjectName("sectionTitle")
         gallery_header.addWidget(self._gallery_header)
         gallery_header.addStretch(1)
@@ -607,7 +613,7 @@ class VProofPanel(QWidget):
         entries: list[ProofCharView] | tuple[ProofCharView, ...],
         *,
         restore_tokens: tuple[str, ...] | list[str] = (),
-        restore_keys: tuple[tuple[str, str, int, str | None], ...] = (),
+        restore_keys: tuple[tuple[str, str, int, int, str | None], ...] = (),
     ) -> None:
         self._entries = tuple(sorted(
             entries,
@@ -644,7 +650,7 @@ class VProofPanel(QWidget):
             self._status.setText("暂无可校对字符")
             self._status.setStyleSheet("")
         else:
-            self._status.setText(f"{len(self._entries)} 个字符")
+            self._status.setText(f"{len(self._entries)} 项")
             self._status.setStyleSheet("")
 
     def apply_workspace_patch(self, patch: ProofWorkspacePatch) -> None:
@@ -711,7 +717,7 @@ class VProofPanel(QWidget):
     def _rebuild_char_list(
         self,
         restore_tokens: tuple[str, ...] | list[str] = (),
-        restore_keys: tuple[tuple[str, str, int, str | None], ...] = (),
+        restore_keys: tuple[tuple[str, str, int, int, str | None], ...] = (),
     ) -> None:
         query = self._char_search.text()
         available = self._filtered_entries()
@@ -767,7 +773,7 @@ class VProofPanel(QWidget):
 
     def _apply_char_selection(
         self,
-        restore_keys: tuple[tuple[str, str, int, str | None], ...] = (),
+        restore_keys: tuple[tuple[str, str, int, int, str | None], ...] = (),
     ) -> None:
         tokens = self._selected_char_tokens()
         if not tokens:
@@ -787,7 +793,7 @@ class VProofPanel(QWidget):
             return
         self._selected_char = tokens[0]
         entries = self._entries_for_text(tokens[0])
-        header = f"相同字索引 · {tokens[0]}（共 {len(entries)} 处）"
+        header = f"相同字符/词索引 · {tokens[0]}（共 {len(entries)} 处）"
         self._set_gallery(entries, header=header, restore_keys=restore_keys)
 
     def _entries_for_text(self, text: str) -> tuple[ProofCharView, ...]:
@@ -825,26 +831,54 @@ class VProofPanel(QWidget):
         entries: tuple[ProofCharView, ...],
         *,
         header: str | None = None,
-        restore_keys: tuple[tuple[str, str, int, str | None], ...] = (),
+        restore_keys: tuple[tuple[str, str, int, int, str | None], ...] = (),
     ) -> None:
         self._gallery.blockSignals(True)
         self._gallery.clear()
+        aspect = 1.0
+        word_boxes = [
+            entry.bbox
+            for entry in entries
+            if entry.char_end > entry.char_index + 1 and entry.bbox is not None
+        ]
+        if word_boxes:
+            aspect = min(
+                3.5,
+                max(
+                    1.0,
+                    max(
+                        (right - left) / max(1, bottom - top)
+                        for left, top, right, bottom in word_boxes
+                    ),
+                ),
+            )
+        thumb_width = round(GALLERY_THUMB * aspect)
+        gallery_size = QSize(thumb_width + 14, GALLERY_CELL)
+        self._gallery.setGridSize(gallery_size)
+        self._gallery.setIconSize(QSize(thumb_width, GALLERY_THUMB))
         if header is not None:
             self._gallery_header.setText(header)
         else:
             self._gallery_header.setText(
-                "相同字索引" if not self._selected_char else f"相同字索引 · {self._selected_char}"
+                "相同字符/词索引"
+                if not self._selected_char
+                else f"相同字符/词索引 · {self._selected_char}"
             )
         for entry in entries:
             # 图标懒加载：先占位，仅可视范围 ±1 屏的条目真正解码切图
             item = QListWidgetItem("")
-            item.setSizeHint(QSize(GALLERY_CELL, GALLERY_CELL))
+            item.setSizeHint(gallery_size)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setData(_ICON_PENDING_ROLE, True)
             geometry_note = "" if entry.available else " · 无精确字符框"
+            position_note = (
+                f"位 #{entry.char_index + 1}"
+                if entry.char_end == entry.char_index + 1
+                else f"位 #{entry.char_index + 1}-{entry.char_end}"
+            )
             item.setToolTip(
                 f"第 {entry.page_number} 页 · {entry.proof_uid}/{entry.text_unit_uid}"
-                f" · 位 #{entry.char_index + 1}{geometry_note}"
+                f" · {position_note}{geometry_note}"
             )
             self._gallery.addItem(item)
         if self._gallery.count():
@@ -890,7 +924,7 @@ class VProofPanel(QWidget):
 
     def _restore_gallery_selection_by_occurrence_keys(
         self,
-        occurrence_keys: tuple[tuple[str, str, int, str | None], ...],
+        occurrence_keys: tuple[tuple[str, str, int, int, str | None], ...],
     ) -> bool:
         """Re-select gallery rows matching stable occurrence keys.
 
@@ -931,17 +965,20 @@ class VProofPanel(QWidget):
             page.image_revision,
             entry.bbox,
             pad,
+            self._gallery.iconSize().width(),
+            self._gallery.iconSize().height(),
         )
         cached = self._icon_cache.get(cache_key)
         if cached is not None:
             self._icon_cache.move_to_end(cache_key)
             return cached
         # 2x source density: Qt only ever down-scales the thumbnail.
-        cell = GALLERY_CELL * 2
-        canvas = QPixmap(cell, cell)
+        canvas_width = max(1, self._gallery.iconSize().width() * 2)
+        canvas_height = max(1, self._gallery.iconSize().height() * 2)
+        canvas = QPixmap(canvas_width, canvas_height)
         canvas.fill(QColor("#FFFDF8"))
         painter = QPainter(canvas)
-        target = QSize(cell - 16, cell - 16)
+        target = QSize(max(1, canvas_width - 16), max(1, canvas_height - 16))
         crop = (
             _crop_page_image(page, page_image, entry.bbox, target, pad=pad)
             if page_image is not None and not page_image.isNull()
@@ -950,8 +987,12 @@ class VProofPanel(QWidget):
         if crop.isNull():
             painter.end()
             return QIcon()
-        painter.drawPixmap((cell - crop.width()) // 2, (cell - crop.height()) // 2, crop)
-        # 旧版心智：相同字索引就是普通的字符切图，不画边框/置信度标记
+        painter.drawPixmap(
+            (canvas_width - crop.width()) // 2,
+            (canvas_height - crop.height()) // 2,
+            crop,
+        )
+        # 索引项只展示 observation crop，不叠加边框或置信度标记。
         painter.end()
         icon = QIcon(canvas)
         self._icon_cache[cache_key] = icon
@@ -1060,18 +1101,25 @@ class VProofPanel(QWidget):
     def _emit(self, command: ProofEditCommand | ProofBatchEditCommand) -> None:
         self.proof_edit_requested.emit(command)
 
-    def _apply_replacement_to_selected(self, text: str) -> int:
-        # 相同字索引覆盖全项目：批量修改作用于所有选中项，跨页替换按
+    def _apply_replacement_to_selected(self, text: str, *, pad_to_span: bool = False) -> int:
+        # 字符/词索引覆盖全项目：批量修改作用于所有选中项，跨页替换按
         # proof state 分组为各自的 replace_many 命令表达，不做 UI 裁剪
         selected = self._selected_entries()
-        grouped: dict[str, dict[tuple[str, str], dict[int, str]]] = defaultdict(dict)
+        grouped: dict[
+            str,
+            dict[tuple[str, str], dict[tuple[int, int], str]],
+        ] = defaultdict(dict)
         for entry in selected:
             key = (entry.proof_uid, entry.text_unit_uid)
             unit = self._units.get(key)
-            if unit is None or entry.char_index >= len(unit.text):
+            if unit is None or entry.char_end > len(unit.text):
                 continue
             changes = grouped[entry.proof_uid].setdefault(key, {})
-            changes[entry.char_index] = text
+            span_width = entry.char_end - entry.char_index
+            replacement = text
+            if pad_to_span:
+                replacement = (text or "")[:span_width].ljust(span_width)
+            changes[(entry.char_index, entry.char_end)] = replacement
         commands: list[ProofEditCommand] = []
         emitted = 0
         for proof_uid, unit_changes in grouped.items():
@@ -1083,10 +1131,13 @@ class VProofPanel(QWidget):
             )
             for key, changes in ordered_changes:
                 unit = self._units[key]
-                chars = list(unit.text)
-                for char_index, replacement in changes.items():
-                    chars[char_index] = replacement
-                updated = "".join(chars)
+                updated = unit.text
+                for (start, end), replacement in sorted(
+                    changes.items(),
+                    key=lambda item: item[0],
+                    reverse=True,
+                ):
+                    updated = updated[:start] + replacement + updated[end:]
                 if updated != unit.text:
                     replacements.append((unit.text_unit_uid, updated))
             if not replacements:
@@ -1115,9 +1166,8 @@ class VProofPanel(QWidget):
         return False
 
     def _gallery_direct_blank(self) -> bool:
-        # One gallery entry is one proof character; replacing it with a
-        # single space blanks the slot while keeping the text length locked.
-        applied = self._apply_replacement_to_selected(" ")
+        # Blank the complete occurrence while preserving its current span.
+        applied = self._apply_replacement_to_selected(" ", pad_to_span=True)
         if applied:
             self._set_status_message(f"已提交清空为空白（{applied} 处）", "ok")
             return True
@@ -1306,7 +1356,7 @@ class VProofPanel(QWidget):
         if page is None or unit is None or line is None:
             self._render_entry(None)
             return
-        # 页面只做弱聚合：全文按版面段落分隔，当前字符仍由稳定索引定位。
+        # 页面只做弱聚合：全文按版面段落分隔，当前 occurrence 仍由稳定索引定位。
         context_text, highlight_offset = self._page_context(entry, line)
         self._ocr_context.setPlainText(context_text)
         self._ocr_context.setExtraSelections([])
@@ -1334,7 +1384,7 @@ class VProofPanel(QWidget):
         entry: ProofCharView,
         page: ProofPageView,
     ) -> None:
-        # 纵校以字符为单位：只画字符框（细线轻填充微外扩，不压字、无行高亮）
+        # 只画当前字符或 word observation 框，不扩张成行高亮。
         pixmap = self._page_source_pixmap(page)
         if pixmap.isNull():
             self._image.clear()

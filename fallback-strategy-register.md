@@ -14,7 +14,7 @@
 1. 只处理通信或展示可用性的 fallback，可以不改变项目数据，但必须记录 telemetry、diagnostic 或日志。
 2. 任何会生成或替换 bbox、char、line、table cell、export payload 的 fallback，都不能伪装成一手事实，必须写入 `bbox_source`、`bbox_granularity`、`review_flags`、`ExportFallback` 或等价标记。
 3. fallback 不得覆盖 Paddle 原始版面事实、Hanwang/CharOCR 一手字符事实、人工版面编辑事实和人工校对文本。
-4. fallback 数据进入 proof 时必须能被识别。估算或不可用几何默认不进入相同字索引，除非调用方显式 `include_fallback=True`。
+4. fallback 数据进入 proof 时必须能被识别。估算或不可用几何不产生可裁切 occurrence；明确标源且带原始 bbox 的 word observation 以一个完整 word occurrence 进入 proof，不拆出伪字符框。
 5. 新 fallback 必须先登记到本文，再进入主线代码。
 
 ## 当前允许策略
@@ -26,7 +26,7 @@
 | proof 几何补框 | `ProofCropService.normalize_pages()` / `ensure_line_char_bboxes()` | line 有文本但没有可用 char bbox，或 char 数量无法表达显示文本 | 生成 `bbox_source="fallback"` / `bbox_granularity="fallback"`；若 line bbox 不可信则写 `unavailable` | `proof_fallback_warning()` 给出非阻塞警告；`is_char_index_hidden_geometry()` 默认隐藏 | 估算几何，不是一手字符真值 |
 | Hanwang 字符 fallback | `hanwang:CharRcg:char_fallback` | Hanwang native 返回单字 fallback 字符框 | 保留 `bbox_source` 中的 `hanwang:` 前缀和 `bbox_granularity="char"` | CharIndex 可索引；不按普通估算 fallback 隐藏 | Hanwang 一手字符几何 |
 | EngCut 空结果 PP word 降级 | `micro_recblock._recognize_engcut_masked_line()` | 已编译的 `text_latin` route 有 PP fallback 文本，但 EngCut 对该 segment 完全无输出 | 写一个 route bbox 上的 word atom；`source="ppocrv6:latin_route_empty_native"`，`review_flags=["latin_route_empty_native_ppocr_fallback"]` | OCR atom 来源、debug flag 和 `RunStats.latin_empty_native_fallbacks` 可见 | 显式 PP OCR 降级，不是 Hanwang 字符真值 |
-| EngCut 字符框冲突 PP word 降级 | `micro_recblock._engcut_route_line_text_and_chars()` | EngCut native group 内字符 bbox 发生重叠，且该 group 唯一落入一个 PP 拉丁 word token | 聚合同一 token 的连续 native groups；PP token 的文本和 bbox 只生成一次 `source="ppocrv6:latin_token_geometry_fallback"` 的 word atom，聚合后的 native 文本和 bbox 只保存为外部候选 | atom 来源、`latin_token_geometry_fallback` review flag 和 `RunStats.latin_token_geometry_fallbacks` 可见 | token-local PP observation 接管；无唯一 token、group 所有权穿插时阻断，不保留损坏字符框，也不扩张成整行回填 |
+| EngCut 字符框冲突 PP word 降级 | `micro_recblock._engcut_route_line_text_and_chars()` | EngCut native group 内字符 bbox 发生重叠，且该 group 唯一落入一个 PP 拉丁 word token | 聚合同一 token 的连续 native groups；PP token 的文本和 bbox 只生成一次 `source="ppocrv6:latin_token_geometry_fallback"` 的 word atom，聚合后的 native 文本和 bbox 只保存为外部候选 | atom 来源、`latin_token_geometry_fallback` review flag 和 `RunStats.latin_token_geometry_fallbacks` 可见；Proof 将它投影为一个可裁切、可整段编辑的 word occurrence | token-local PP observation 接管；无唯一 token、group 所有权穿插时阻断，不保留损坏字符框，也不扩张成整行回填 |
 | 单字符拉丁墨迹补全 | `charocr_text_partition._complete_single_latin_token_components()` | 单字符 PP 拉丁 token 只强拥有一个小组件，且存在唯一的同字形剩余组件 | 用方向、间距和整体尺寸约束合并组件，记录 `single_latin_token_geometry_completed` | route diagnostic 可见 | 仅补全 route 几何，不采用 PP 文本；候选不唯一或不满足约束时以 `incomplete_single_latin_token_ink` 阻断该页 |
 | PP 独立标点缺失 atom | `micro_recblock._apply_ppocr_symbol_observations()` | 完整组件 observation 唯一归属一条物理行，且不与任何 native atom 相交 | 按几何顺序插入 `source="ppocrv6:symbol_foreground_observation"` 的 char atom | atom 的文本、bbox、source 和 `RunStats.ppocr_symbol_atoms_inserted` 可持久化；执行期行 flag 不进入 `OcrLine` | PP token observation，不是整行、模糊或静默文本回填 |
 | 表格 cell bbox 网格降级 | `table_text_layer.build_table_text_layer_cells()` / `equal_grid_fallback` | 图像聚类无法推断 cell bbox，但已有 row/col 结构 | 按表格 bbox 等分生成 cell bbox，标记 `bbox_source="equal_grid_fallback"` | Export/Text layer 可见 | 表格文本层辅助几何，不是字符真值 |

@@ -258,6 +258,29 @@ def _fit_glyph_font(text_char: str, font: QFont, max_ink_width: float) -> QFont:
     return fitted
 
 
+def _fit_text_font(text: str, font: QFont, max_ink_width: float) -> QFont:
+    """Shrink one atom-level text run only when it exceeds its word bbox."""
+
+    fitted = QFont(font)
+    if not text:
+        return fitted
+    available = max(1, int(max_ink_width))
+    metrics = QFontMetrics(fitted)
+    ink_width = metrics.tightBoundingRect(text).width()
+    if ink_width <= available:
+        return fitted
+    base_pixel_size = fitted.pixelSize()
+    if base_pixel_size <= 0:
+        base_pixel_size = max(1, metrics.height())
+    fitted.setPixelSize(max(1, int(base_pixel_size * available / ink_width)))
+    while (
+        fitted.pixelSize() > 1
+        and QFontMetrics(fitted).tightBoundingRect(text).width() > available
+    ):
+        fitted.setPixelSize(fitted.pixelSize() - 1)
+    return fitted
+
+
 def _is_punctuation_slot_text(text: str) -> bool:
     """Whether a slot should draw text centered inside its visual cell."""
 
@@ -634,6 +657,7 @@ class _SlotLineEditor(QWidget):
         self._redo_stack: list[tuple[str, int, int]] = []
         self._max_undo = 100
         self._expanded_edit_index: int | None = None
+        self._expanded_edit_range: tuple[int, int] | None = None
         self._expanded_edit = _ExpandedSlotEdit(self)
         self._expanded_edit.setObjectName("slotExpandedEdit")
         self._expanded_edit.hide()
@@ -923,10 +947,12 @@ class _SlotLineEditor(QWidget):
         pos = self._cursor.position()
         return pos, min(pos + 1, len(self.toPlainText()))
 
-    def _open_expanded_edit(self, index: int) -> None:
+    def _open_expanded_edit(self, index: int, end: int | None = None) -> None:
         text = self.toPlainText()
-        if self._read_only or index < 0 or index >= len(text):
+        end = index + 1 if end is None else end
+        if self._read_only or index < 0 or index >= len(text) or end <= index:
             return
+        end = min(end, len(text))
         cells = self._interaction_cells(text)
         cell = cells[index] if index < len(cells) else None
         if cell is None:
@@ -934,8 +960,9 @@ class _SlotLineEditor(QWidget):
         width = min(max(120, cell.width() * 3), max(1, self.width()))
         x = max(0, min(self.width() - width, cell.center().x() - width // 2))
         self._expanded_edit_index = index
+        self._expanded_edit_range = (index, end)
         self._expanded_edit.setGeometry(x, 0, width, self.height())
-        self._expanded_edit.setText(text[index:index + 1])
+        self._expanded_edit.setText(text[index:end])
         self._expanded_edit.selectAll()
         self._expanded_edit.show()
         self._expanded_edit.raise_()
@@ -943,22 +970,26 @@ class _SlotLineEditor(QWidget):
 
     def _commit_expanded_edit(self, replacement: str) -> None:
         index = self._expanded_edit_index
-        if index is None or not replacement:
+        edit_range = self._expanded_edit_range
+        if index is None or edit_range is None or not replacement:
             return
         self._expanded_edit_index = None
+        self._expanded_edit_range = None
         self._expanded_edit.hide()
-        self.replace_text_range(index, index + 1, replacement)
+        self.replace_text_range(edit_range[0], edit_range[1], replacement)
         self.setFocus()
 
     def _cancel_expanded_edit(self) -> None:
         if self._expanded_edit_index is None:
             return
         self._expanded_edit_index = None
+        self._expanded_edit_range = None
         self._expanded_edit.hide()
         self.setFocus()
 
     def _dismiss_expanded_edit(self) -> None:
         self._expanded_edit_index = None
+        self._expanded_edit_range = None
         self._expanded_edit.hide()
 
     def _replace_selected_slots(self, text: str) -> None:
@@ -1235,6 +1266,8 @@ class _SlotLineEditor(QWidget):
         font.setWeight(TEXT_FONT_WEIGHT)
         if overlay.kind == "formula":
             font.setItalic(True)
+        elif overlay.kind == "word":
+            font = _fit_text_font(overlay.text, font, max(1, rect.width() - 4))
         painter.setFont(font)
         painter.setPen(QPen(self.palette().text().color(), 1))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, overlay.text)
@@ -1378,7 +1411,13 @@ class _SlotLineEditor(QWidget):
             super().mouseDoubleClickEvent(event)
             return
         pos = self._event_pos(event)
-        if self._atom_overlay_for_x(float(pos.x())) is not None:
+        overlay = self._atom_overlay_for_x(float(pos.x()))
+        if overlay is not None and overlay.kind == "word":
+            self.row_focus_requested.emit()
+            self._open_expanded_edit(overlay.start, overlay.end)
+            event.accept()
+            return
+        if overlay is not None:
             super().mouseDoubleClickEvent(event)
             return
         index = self._slot_index_for_x(float(pos.x()), nearest=True)
@@ -2152,7 +2191,12 @@ class _ProofRowWidget(QFrame):
         entries = self.row.entries
         if not entries:
             return False
-        return len(self.editor.toPlainText()) == len(entries)
+        cursor = 0
+        for entry in sorted(entries, key=lambda item: (item.char_index, item.char_end)):
+            if entry.char_index != cursor or entry.char_end <= entry.char_index:
+                return False
+            cursor = entry.char_end
+        return cursor == len(self.editor.toPlainText())
 
     def _refresh_status(self) -> None:
         status = "conflict" if self._external_conflict else self._status_value
@@ -2187,18 +2231,26 @@ class _ProofRowWidget(QFrame):
 
     def _classify_char_verdict(self, index: int) -> _cv.CharVerdict | None:
         entries = self.row.entries
-        if not (0 <= index < len(entries)):
+        entry = next(
+            (
+                item
+                for item in entries
+                if item.char_index <= index < item.char_end
+            ),
+            None,
+        )
+        if entry is None:
             return None
         text = self.editor.toPlainText()
-        if index >= len(text):
+        if entry.char_end > len(text):
             return None
-        entry = entries[index]
-        # 只在等长时取同下标 OCR 字符；长度不一致退回 None，避免错位比对
-        ocr_char = entry.ocr_char if self._chars_aligned() else None
+        # 只在文本范围仍对齐时比较 OCR observation；word occurrence 以
+        # 整词比较，不把 word bbox 重新拆成逐字证据。
+        ocr_text = entry.ocr_char if self._chars_aligned() else None
         return _cv.classify_char(
             confidence=entry.confidence,
-            text_char=text[index],
-            ocr_char=ocr_char,
+            text_char=text[entry.char_index:entry.char_end],
+            ocr_char=ocr_text,
         )
 
     def _refresh_extra_selections(self) -> None:
@@ -2217,16 +2269,16 @@ class _ProofRowWidget(QFrame):
         sels: list = []
 
         if self.row.kind != "formula" and self._chars_aligned():
-            for i in range(min(len(self.row.entries), len(doc_text))):
-                verdict = self._classify_char_verdict(i)
+            for entry in self.row.entries:
+                verdict = self._classify_char_verdict(entry.char_index)
                 if verdict is None:
                     continue
                 if verdict.color == _cv.COLOR_UNVERIFIED and not verdict.user_modified:
                     continue
                 sel = QTextEdit.ExtraSelection()
                 cur = QTextCursor(editor.document())
-                cur.setPosition(i)
-                cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
+                cur.setPosition(entry.char_index)
+                cur.setPosition(entry.char_end, QTextCursor.MoveMode.KeepAnchor)
                 fmt = QTextCharFormat()
                 if verdict.color != _cv.COLOR_UNVERIFIED:
                     fmt.setForeground(QColor(verdict.color))
@@ -2508,7 +2560,7 @@ class _ProofRowWidget(QFrame):
         self._formula_render_label.adjustSize()
 
     def _refresh_atom_visual_overlays(self) -> None:
-        """Render inline formula atoms over their exact char spans.
+        """Render atom-level formula and word observations over their spans.
 
         Placement comes only from ``ProofAtomView.char_span`` projected
         through the slot geometry; there is deliberately no regex or text
@@ -2525,8 +2577,6 @@ class _ProofRowWidget(QFrame):
             and len(text) == len(self.row.line.proof_text)
         ):
             for placement in self.row.atom_placements:
-                if _atom_kind(placement.atom) != "formula":
-                    continue
                 indices = placement.char_indices
                 if not indices:
                     continue
@@ -2536,6 +2586,27 @@ class _ProofRowWidget(QFrame):
                 ):
                     continue
                 start, end = indices[0], indices[-1] + 1
+                left = centers[indices[0]] - widths[indices[0]] / 2.0
+                right = centers[indices[-1]] + widths[indices[-1]] / 2.0
+                if (
+                    placement.atom.granularity.strip().lower() == "word"
+                    and _atom_kind(placement.atom) is None
+                ):
+                    overlays.append(
+                        _AtomVisualOverlay(
+                            start=start,
+                            end=end,
+                            left=left,
+                            right=right,
+                            text=text[start:end],
+                            pixmap=None,
+                            logical_size=None,
+                            kind="word",
+                        )
+                    )
+                    continue
+                if _atom_kind(placement.atom) != "formula":
+                    continue
                 target_height = max(
                     8,
                     round(max(1, self.editor.height()) * FORMULA_VISUAL_HEIGHT_RATIO),
@@ -2547,8 +2618,8 @@ class _ProofRowWidget(QFrame):
                     _AtomVisualOverlay(
                         start=start,
                         end=end,
-                        left=centers[indices[0]] - widths[indices[0]] / 2.0,
-                        right=centers[indices[-1]] + widths[indices[-1]] / 2.0,
+                        left=left,
+                        right=right,
                         text=visual.text or "",
                         pixmap=visual.pixmap,
                         logical_size=visual.logical_size,
@@ -2735,14 +2806,13 @@ class _ProofRowWidget(QFrame):
     # ── editor geometry (letter-spacing contract + slot geometry) ──
 
     def _proof_char_spans(self) -> dict[int, tuple[float, float]]:
-        """Per-character x spans in page coordinates.
+        """Proof occurrence x spans in page coordinates.
 
-        Each atom's bbox is distributed across its characters by estimated
-        glyph width (CJK full width, Latin/digit ~0.56, half-width
-        punctuation ~0.35, space 0.5) instead of equal division, so mixed
-        CJK/digit/punctuation lines track the ink much better.  Formula and
-        table atoms opt out: their rendered glyph positions do not follow
-        the source text, so pretending an alignment would be dishonest.
+        Character atoms retain per-character geometry.  Every character index
+        owned by a word atom receives the same complete word bbox so the paint
+        and hit-test layers can treat that range as one occurrence without
+        manufacturing internal character positions.  Formula and table atoms
+        opt out where their rendered glyph positions do not follow source text.
         """
 
         spans: dict[int, tuple[float, float]] = {}
@@ -2757,6 +2827,10 @@ class _ProofRowWidget(QFrame):
             if not indices:
                 continue
             left, _top, right, _bottom = placement.atom.bbox
+            if placement.atom.granularity.strip().lower() == "word":
+                for index in indices:
+                    spans[index] = (float(left), float(right))
+                continue
             weights = [
                 max(0.05, _char_slot_weight(proof_text[index]))
                 for index in indices
@@ -2903,7 +2977,10 @@ class _ProofRowWidget(QFrame):
 
         cursor = self.editor.textCursor()
         cursor.setPosition(min(entry.char_index, len(self.editor.toPlainText())))
-        cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+        cursor.setPosition(
+            min(entry.char_end, len(self.editor.toPlainText())),
+            QTextCursor.MoveMode.KeepAnchor,
+        )
         self.editor.setTextCursor(cursor)
         self.editor.setFocus()
 

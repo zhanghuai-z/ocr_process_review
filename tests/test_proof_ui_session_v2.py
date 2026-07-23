@@ -1228,11 +1228,11 @@ def test_vproof_gallery_crop_padding_depends_only_on_character_geometry(
     assert _gallery_crop_pad(entry) == 2
 
 
-def test_char_views_do_not_reuse_one_word_bbox_as_multiple_character_crops(
+def test_char_views_keep_one_word_bbox_as_one_range_occurrence(
     qapp,
     tmp_path,
 ) -> None:
-    """A word carrier owns text, but cannot provide exact per-char geometry."""
+    """A word carrier owns one exact word crop, never guessed char crops."""
 
     from app.ui.proof.confidence_view import build_char_views
 
@@ -1252,14 +1252,69 @@ def test_char_views_do_not_reuse_one_word_bbox_as_multiple_character_crops(
         workspace.pages[0],
     )
 
-    assert [entry.text for entry in entries] == ["a", "b"]
-    assert [entry.ocr_char for entry in entries] == ["a", "b"]
-    assert all(entry.atom_uid == word_atom.atom_uid for entry in entries)
-    assert all(entry.bbox is None for entry in entries)
-    assert all(entry.available is False for entry in entries)
+    assert len(entries) == 1
+    assert entries[0].text == "ab"
+    assert entries[0].ocr_char == "ab"
+    assert entries[0].atom_uid == word_atom.atom_uid
+    assert (entries[0].char_index, entries[0].char_end) == (0, 2)
+    assert entries[0].bbox == word_atom.bbox
+    assert entries[0].available is True
 
 
-def test_vproof_word_carrier_does_not_render_a_fake_character_crop(
+def test_hproof_word_carrier_draws_and_selects_one_word_occurrence(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    line = state.lines[0]
+    word_atom = replace(
+        line.atoms[0],
+        text="ab",
+        token_text="ab",
+        granularity="word",
+        char_span=(0, 2),
+        geometry_available=True,
+    )
+    word_line = replace(line, atoms=(word_atom,))
+    word_state = replace(state, lines=(word_line,))
+    panel = HProofPanel(replace(
+        workspace,
+        proof_states=(word_state,),
+        lines=(word_line,),
+    ))
+    panel.resize(900, 500)
+    panel.show()
+    qapp.processEvents()
+    row = panel._row_widgets[(state.proof_uid, line.text_unit_uid)]
+    row._refresh_editor_geometry()
+    overlays = row.editor.atom_visual_overlays()
+
+    assert row._proof_char_spans() == {0: (10.0, 30.0), 1: (10.0, 30.0)}
+    assert len(overlays) == 1
+    assert (overlays[0].kind, overlays[0].text) == ("word", "ab")
+    assert (overlays[0].start, overlays[0].end) == (0, 2)
+
+    click_x = round((overlays[0].left + overlays[0].right) / 2.0)
+    QTest.mouseClick(
+        row.editor,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(click_x, row.editor.height() // 2),
+    )
+    assert row.editor.textCursor().selectedText() == "ab"
+    QTest.mouseDClick(
+        row.editor,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(click_x, row.editor.height() // 2),
+    )
+    assert row.editor._expanded_edit.text() == "ab"
+    panel.close()
+
+
+def test_vproof_word_carrier_renders_one_word_crop_and_replaces_its_range(
     qapp,
     tmp_path,
 ) -> None:
@@ -1277,14 +1332,25 @@ def test_vproof_word_carrier_does_not_render_a_fake_character_crop(
         char_span=(0, 2),
         geometry_available=True,
     )
-    entry = build_char_views(
-        replace(line, atoms=(word_atom,)),
-        workspace.pages[0],
-    )[0]
-    panel = VProofPanel(workspace)
+    word_line = replace(line, atoms=(word_atom,))
+    state = workspace.proof_states[0]
+    word_state = replace(state, lines=(word_line,))
+    word_workspace = replace(
+        workspace,
+        proof_states=(word_state,),
+        lines=(word_line,),
+    )
+    entry = build_char_views(word_line, workspace.pages[0])[0]
+    panel = VProofPanel(word_workspace)
+    commands: list[ProofEditCommand] = []
+    panel.proof_edit_requested.connect(commands.append)
 
-    assert entry.bbox is None
-    assert panel._entry_icon(entry).isNull()
+    assert entry.text == "ab"
+    assert entry.bbox == word_atom.bbox
+    assert panel._entries == (entry,)
+    assert not panel._entry_icon(entry).isNull()
+    assert panel._apply_replacement_to_selected("word") == 1
+    assert commands[0].replacements == (("unit-1", "word"),)
     panel.close()
 
 
