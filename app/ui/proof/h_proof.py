@@ -144,6 +144,10 @@ NEAR_LINE_PAIR_MIN_H = 52
 NEAR_LINE_PAIR_MAX_H = 58
 FAR_LINE_PAIR_MIN_H = 48
 FAR_LINE_PAIR_MAX_H = 54
+TEXT_NEAR_LINE_PAIR_MIN_H = 68
+TEXT_NEAR_LINE_PAIR_MAX_H = 74
+TEXT_FAR_LINE_PAIR_MIN_H = 64
+TEXT_FAR_LINE_PAIR_MAX_H = 70
 FOCUS_OPACITY = {"active": 1.0, "near": 0.45, "far": 0.30}
 FOCUS_TRANSITION_MS = 120
 
@@ -2125,7 +2129,11 @@ class _ProofRowWidget(QFrame):
             else (
                 (FORMULA_IMAGE_ROW_H if self.row.kind == "formula" else IMAGE_ROW_H)
                 if active
-                else (NEAR_IMAGE_ROW_H if depth == "near" else FAR_IMAGE_ROW_H)
+                else (
+                    IMAGE_ROW_H
+                    if self.row.kind == "text" and not self._large_image
+                    else (NEAR_IMAGE_ROW_H if depth == "near" else FAR_IMAGE_ROW_H)
+                )
             )
         )
         extra = (
@@ -2143,9 +2151,17 @@ class _ProofRowWidget(QFrame):
             else:
                 min_h, max_h = LINE_PAIR_MIN_H, LINE_PAIR_MAX_H
         elif depth == "near":
-            min_h, max_h = NEAR_LINE_PAIR_MIN_H, NEAR_LINE_PAIR_MAX_H
+            min_h, max_h = (
+                (TEXT_NEAR_LINE_PAIR_MIN_H, TEXT_NEAR_LINE_PAIR_MAX_H)
+                if self.row.kind == "text" and not self._large_image
+                else (NEAR_LINE_PAIR_MIN_H, NEAR_LINE_PAIR_MAX_H)
+            )
         else:
-            min_h, max_h = FAR_LINE_PAIR_MIN_H, FAR_LINE_PAIR_MAX_H
+            min_h, max_h = (
+                (TEXT_FAR_LINE_PAIR_MIN_H, TEXT_FAR_LINE_PAIR_MAX_H)
+                if self.row.kind == "text" and not self._large_image
+                else (FAR_LINE_PAIR_MIN_H, FAR_LINE_PAIR_MAX_H)
+            )
         target_min_h = min_h + extra
         target_max_h = max_h + extra
         target_opacity = FOCUS_OPACITY[depth]

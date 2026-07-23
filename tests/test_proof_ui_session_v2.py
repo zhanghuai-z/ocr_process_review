@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem
@@ -763,6 +763,28 @@ def test_hproof_resolves_image_hit_before_focus_rescales_row(
 
     assert order == ["resolve", "activate"]
     assert widget.editor.textCursor().selectionStart() == target.char_index
+    panel.close()
+
+
+def test_hproof_text_image_scale_stays_stable_across_focus_depths(
+    qapp,
+    tmp_path,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel, IMAGE_ROW_H
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+
+    widget.set_focus_depth("far")
+    far_size = QSize(widget._displayed_pixmap_size)
+    widget.set_focus_depth("near")
+    near_size = QSize(widget._displayed_pixmap_size)
+    widget.set_focus_depth("active")
+    active_size = QSize(widget._displayed_pixmap_size)
+
+    assert widget._image.height() == IMAGE_ROW_H
+    assert far_size == near_size == active_size
     panel.close()
 
 
