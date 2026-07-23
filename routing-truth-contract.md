@@ -32,13 +32,11 @@
    - 标点不是第三个 native 分支。拉丁 token 内的 ASCII 标点可以随 word 进入 EngCut；外部标点和中文标点留在 LineCut。原生探针已验证 EngCut 可逐字符返回 `[`、`]` 和 `/`。
    - PP 标点 token 的空白范围不得切伤相邻拉丁字形。只有与唯一拉丁所有者共享水平墨迹投影、且未被显式 LineCut 所有权占用的完整组件可以归还该拉丁 token；竞争归属保持未决。单字符拉丁 token 只拥有小块墨迹时，仅在另外一个组件满足同字形的方向、间距和整体尺寸约束且候选唯一时补全几何，并记录 `single_latin_token_geometry_completed`；否则产生阻断 issue `incomplete_single_latin_token_ink`，不以残缺框继续 OCR。
    - 可唯一恢复完整组件的独立标点可保留为 `PpOcrSymbolObservation`。若 observation 与一个 native atom 严格一对一绑定且文本不同，只成为带独立来源和 bbox 的 `OcrCandidate`。若它唯一归属一条物理行、且 bbox 与任何 native atom 均不相交，可按 bbox 横向顺序创建明确标源的缺失符号 atom。多个行所有者、多个 native atom 所有者或与未认领 native atom 相交时均保持未绑定；不得替换或重排 native atom，也不能按文本邻近关系猜位置。
-   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本和组件 mask；当一个 EngCut group 与一个 PP token 通过中心几何唯一一对一绑定且等长但文本不一致时，EngCut 文本和字符框保持不变，PP 字符只作为明确标源的候选。绑定不唯一或长度不等时禁止建立逐字候选。
+   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本和组件 mask。EngCut native group 的字符 bbox 不重叠时，CharOCR 文本和字符框保持主观察；唯一一对一且等长的 PP 文本分歧只保存为候选。若 native group 内字符 bbox 重叠，则字符几何和对应文本同时降级；只有该 group 唯一落入一个 PP word token 时，才聚合同一 token 的连续 native groups，以 PP token 的文本和原始 word bbox 生成一次明确标源的 word atom，聚合 native 文本只作为外部候选。没有唯一 PP token 或同 token groups 不连续时阻断，不保留损坏字符框。
 7. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 Paddle 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
 8. 路由运行摘要以追加记录持久化；CharOCR 输出写入 OCR observation。PP 标点候选绑定、缺失 atom 插入和未绑定分别进入运行统计；插入 atom 的 `text/bbox/source` 持久化到 OCR observation。`ppocr_symbol_missing_native_atom` 是执行期行 review flag，当前 `OcrLine` 持久化模型不保存行 review flags。公式文本仍由公式分支保有，不由 CharOCR 回填。
 
-EngCut 只处理已编译为 `text_latin` 的 crop。只有 EngCut 对一个已有拉丁 route
-完全无输出时，才允许采用该 typed route 自带的 PP 文本生成明确标源的 word
-fallback。非空 CharOCR 文本不得与 PP/VL 择优；禁止恢复旧的全页文本搜索、模糊匹配、整行静默回填或按字符串猜位置链路。
+EngCut 只处理已编译为 `text_latin` 的 crop。EngCut 对已有拉丁 route 完全无输出时，可采用该 typed route 自带的 PP 文本生成明确标源的 word fallback；EngCut native group 字符框重叠时，可由唯一绑定的 PP word token 同时接管该 token 的文本和 bbox。除此之外，非空且几何可靠的 CharOCR 文本不得与 PP/VL 择优；禁止恢复旧的全页文本搜索、模糊匹配、整行静默回填或按字符串猜位置链路。
 
 路由 segment 的 `bbox` 是行内 mask/crop 几何；公式可另外保留完整布局框 `content_bbox`。`text_latin` 可携带只读 `ppocr_latin_tokens`，行还可携带 `PpOcrSymbolObservation`；它们都不是布局或校对真值。
 

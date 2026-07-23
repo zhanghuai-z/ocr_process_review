@@ -673,6 +673,185 @@ def test_engcut_keeps_native_text_without_guessing_unequal_pp_alignment():
     assert disagreed is True
 
 
+def test_engcut_degraded_group_uses_uniquely_bound_pp_word_observation():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    native_chars = [
+        micro_module.EngcutChar(text="o", bbox=(10, 5, 24, 30), char_index=0),
+        micro_module.EngcutChar(text="f", bbox=(22, 4, 36, 30), char_index=1),
+    ]
+
+    text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+        native_chars,
+        ppocr_tokens=(PpOcrLatinTokenObservation("of", (8, 3, 38, 31)),),
+    )
+
+    assert text == "of"
+    assert len(atoms) == 1
+    assert atoms[0].text == "of"
+    assert atoms[0].bbox == (8, 3, 38, 31)
+    assert atoms[0].source == "ppocrv6:latin_token_geometry_fallback"
+    assert atoms[0].bbox_granularity == "word"
+    assert atoms[0].token_text == "of"
+    assert atoms[0].external_candidates == [
+        micro_module.CharOcrCandidateObservation(
+            text="of",
+            confidence=0.0,
+            source="hanwang:EngCut:latin_route:geometry_degraded_observation",
+            bbox=(10, 4, 36, 30),
+        )
+    ]
+    assert disagreed is False
+
+
+def test_engcut_degraded_token_collects_multiple_contiguous_native_groups():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+        [
+            micro_module.EngcutChar(
+                text="L", bbox=(10, 5, 20, 30), group_index=0, char_index=0,
+            ),
+            micro_module.EngcutChar(
+                text="i", bbox=(20, 5, 26, 30), group_index=0, char_index=1,
+            ),
+            micro_module.EngcutChar(
+                text="n", bbox=(26, 5, 38, 30), group_index=1, char_index=0,
+            ),
+            micro_module.EngcutChar(
+                text="g", bbox=(36, 4, 49, 30), group_index=1, char_index=1,
+            ),
+        ],
+        ppocr_tokens=(PpOcrLatinTokenObservation("Ling", (8, 3, 52, 31)),),
+    )
+
+    assert text == "Ling"
+    assert [(atom.text, atom.bbox, atom.bbox_granularity) for atom in atoms] == [
+        ("Ling", (8, 3, 52, 31), "word"),
+    ]
+    assert atoms[0].external_candidates[0].text == "Ling"
+    assert atoms[0].external_candidates[0].bbox == (10, 4, 49, 30)
+    assert disagreed is False
+
+
+def test_engcut_degraded_group_fails_without_unique_pp_word_observation():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    native_chars = [
+        micro_module.EngcutChar(text="o", bbox=(10, 5, 24, 30), char_index=0),
+        micro_module.EngcutChar(text="f", bbox=(22, 4, 36, 30), char_index=1),
+    ]
+    token_sets = (
+        (),
+        (
+            PpOcrLatinTokenObservation("of", (8, 3, 38, 31)),
+            PpOcrLatinTokenObservation("0f", (9, 2, 39, 32)),
+        ),
+    )
+
+    for tokens in token_sets:
+        with pytest.raises(RuntimeError, match="without one uniquely bound PP word token"):
+            micro_module._engcut_route_line_text_and_chars(
+                native_chars,
+                ppocr_tokens=tokens,
+            )
+
+
+def test_engcut_degraded_token_fails_when_bound_groups_are_not_contiguous():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    with pytest.raises(RuntimeError, match="are not contiguous"):
+        micro_module._engcut_route_line_text_and_chars(
+            [
+                micro_module.EngcutChar(
+                    text="L", bbox=(10, 5, 24, 30), group_index=0, char_index=0,
+                ),
+                micro_module.EngcutChar(
+                    text="i", bbox=(22, 4, 36, 30), group_index=0, char_index=1,
+                ),
+                micro_module.EngcutChar(
+                    text="x", bbox=(42, 5, 52, 30), group_index=1, char_index=0,
+                ),
+                micro_module.EngcutChar(
+                    text="n", bbox=(58, 5, 68, 30), group_index=2, char_index=0,
+                ),
+                micro_module.EngcutChar(
+                    text="g", bbox=(68, 4, 78, 30), group_index=2, char_index=1,
+                ),
+            ],
+            ppocr_tokens=(
+                PpOcrLatinTokenObservation("Ling", (8, 3, 82, 31)),
+                PpOcrLatinTokenObservation("x", (40, 3, 54, 31)),
+            ),
+        )
+
+
+def test_engcut_nonoverlapping_group_keeps_native_character_observations():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+        [
+            micro_module.EngcutChar(text="o", bbox=(10, 5, 24, 30), char_index=0),
+            micro_module.EngcutChar(text="f", bbox=(24, 4, 36, 30), char_index=1),
+        ],
+        ppocr_tokens=(PpOcrLatinTokenObservation("of", (8, 3, 38, 31)),),
+    )
+
+    assert text == "of"
+    assert [(atom.text, atom.bbox_granularity) for atom in atoms] == [
+        ("o", "char"),
+        ("f", "char"),
+    ]
+    assert disagreed is False
+
+
+def test_engcut_geometry_fallback_is_flagged_and_counted(monkeypatch):
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    segment = micro_module._TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(0, 0, 80, 36),
+        kind="text_latin",
+        ppocr_latin_tokens=(PpOcrLatinTokenObservation("of", (8, 3, 38, 31)),),
+    )
+    route = micro_module._EngCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(0, 0, 80, 36),
+        segments=(segment,),
+    )
+    monkeypatch.setattr(
+        micro_module.native_bridge,
+        "run_eng20_recogline",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        micro_module,
+        "engcut_chars_from_payload",
+        lambda _payload: [
+            micro_module.EngcutChar(text="o", bbox=(10, 5, 24, 30), char_index=0),
+            micro_module.EngcutChar(text="f", bbox=(22, 4, 36, 30), char_index=1),
+        ],
+    )
+    stats = micro_module.RunStats()
+
+    result = micro_module._recognize_engcut_masked_line(
+        np.full((40, 90, 3), 255, dtype=np.uint8),
+        route,
+        stats,
+        timeout=1.0,
+    )[segment.key]
+
+    assert result.text == "of"
+    assert result.bbox == (8, 3, 38, 31)
+    assert [atom.text for atom in result.chars] == ["of"]
+    assert result.review_flags == ["latin_token_geometry_fallback"]
+    assert result.source.endswith("+ppocrv6_token_geometry_fallback")
+    assert stats.latin_token_geometry_fallbacks == 1
+
+
 def test_engcut_empty_native_result_keeps_explicit_pp_fallback(monkeypatch):
     import app.engines.hanwang.micro_recblock as micro_module
 

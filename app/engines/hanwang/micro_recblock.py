@@ -77,6 +77,9 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE = "ppocrv6:latin_token_text_alignment"
 PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG = "latin_token_text_disagreement"
+PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE = "ppocrv6:latin_token_geometry_fallback"
+PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG = "latin_token_geometry_fallback"
+ENGCUT_DEGRADED_NATIVE_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_observation"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 PPOCR_SYMBOL_FOREGROUND_SOURCE = "ppocrv6:symbol_foreground_observation"
@@ -221,6 +224,7 @@ class RunStats:
     geometry_conflict_groups: int = 0
     geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
+    latin_token_geometry_fallbacks: int = 0
     latin_token_text_disagreements: int = 0
     ppocr_symbol_candidates_bound: int = 0
     ppocr_symbol_atoms_inserted: int = 0
@@ -1779,7 +1783,71 @@ def _engcut_route_line_text_and_chars(
         for token in token_bindings
         if token is not None
     }
+    token_group_indices: dict[PpOcrLatinTokenObservation, list[int]] = {}
+    for group_index, token in enumerate(token_bindings):
+        if token is not None:
+            token_group_indices.setdefault(token, []).append(group_index)
+    degraded_tokens: set[PpOcrLatinTokenObservation] = set()
+    for group_index, (visible, token) in enumerate(zip(visible_groups, token_bindings)):
+        if not _engcut_group_has_overlapping_char_bboxes(visible):
+            continue
+        if token is None:
+            group_text = "".join(str(char.text or "") for char in visible)
+            raise RuntimeError(
+                "EngCut group has degraded character geometry without one "
+                f"uniquely bound PP word token: text={group_text!r}"
+            )
+        indices = token_group_indices[token]
+        if indices != list(range(indices[0], indices[-1] + 1)):
+            raise RuntimeError(
+                "EngCut groups bound to one degraded PP word token are not contiguous: "
+                f"token={token.text!r} groups={indices}"
+            )
+        degraded_tokens.add(token)
+    emitted_degraded_tokens: set[PpOcrLatinTokenObservation] = set()
     for visible, token in zip(visible_groups, token_bindings):
+        if token in degraded_tokens:
+            assert token is not None
+            if token in emitted_degraded_tokens:
+                continue
+            if has_output_group:
+                text_parts.append(" ")
+                results.append(
+                    _NativeAtomResult(
+                        text=" ",
+                        confidence=0.0,
+                        bbox=None,
+                        candidates=[" "],
+                        source=source,
+                        bbox_granularity="space",
+                        token_text=" ",
+                    )
+                )
+            token_groups = [visible_groups[index] for index in token_group_indices[token]]
+            native_chars = [char for group in token_groups for char in group]
+            native_text = "".join(str(char.text or "") for char in native_chars)
+            native_boxes = [char.bbox for char in native_chars if char.bbox is not None]
+            text_parts.append(token.text)
+            results.append(_NativeAtomResult(
+                text=token.text,
+                confidence=0.0,
+                bbox=token.bbox,
+                candidates=[token.text],
+                external_candidates=[CharOcrCandidateObservation(
+                    text=native_text,
+                    confidence=0.0,
+                    source=ENGCUT_DEGRADED_NATIVE_SOURCE,
+                    bbox=union_xyxy(native_boxes),
+                )],
+                source=PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE,
+                bbox_granularity="word",
+                token_text=token.text,
+            ))
+            if native_text != token.text:
+                has_ppocr_text_disagreement = True
+            has_output_group = True
+            emitted_degraded_tokens.add(token)
+            continue
         if has_output_group:
             text_parts.append(" ")
             results.append(
@@ -1795,17 +1863,20 @@ def _engcut_route_line_text_and_chars(
             )
         group_text = "".join(str(char.text or "") for char in visible)
         has_output_group = True
+        uniquely_bound_token = (
+            token
+            if token is not None and token_binding_counts.get(token) == 1
+            else None
+        )
         can_bind_ppocr_candidates = (
-            token is not None
-            and token_binding_counts.get(token) == 1
-            and group_text != token.text
-            and len(visible) == len(token.text)
+            uniquely_bound_token is not None
+            and group_text != uniquely_bound_token.text
+            and len(visible) == len(uniquely_bound_token.text)
             and all(len(str(char.text or "")) == 1 for char in visible)
         )
-        if token is not None and token_binding_counts.get(token) == 1 and group_text != token.text:
+        if uniquely_bound_token is not None and group_text != uniquely_bound_token.text:
             has_ppocr_text_disagreement = True
         if can_bind_ppocr_candidates:
-            assert token is not None
             text_parts.append(group_text)
             results.extend(
                 _NativeAtomResult(
@@ -1817,13 +1888,13 @@ def _engcut_route_line_text_and_chars(
                         text=aligned_text,
                         confidence=0.0,
                         source=PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE,
-                        bbox=token.bbox,
+                        bbox=uniquely_bound_token.bbox,
                     )],
                     source=source,
                     bbox_granularity="char",
                     token_text=str(native_char.text or ""),
                 )
-                for native_char, aligned_text in zip(visible, token.text)
+                for native_char, aligned_text in zip(visible, uniquely_bound_token.text)
             )
             continue
         text_parts.append(group_text)
@@ -1840,6 +1911,17 @@ def _engcut_route_line_text_and_chars(
             for char in visible
         )
     return "".join(text_parts), results, has_ppocr_text_disagreement
+
+
+def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
+    boxes = [char.bbox for char in chars]
+    if any(box is None for box in boxes):
+        return False
+    ordered = sorted(
+        (box for box in boxes if box is not None),
+        key=lambda box: (box[0], box[1], box[2], box[3]),
+    )
+    return any(right[0] < left[2] for left, right in zip(ordered, ordered[1:]))
 
 
 def _ppocr_token_for_engcut_group(
@@ -2089,20 +2171,30 @@ def _recognize_engcut_masked_line(
             )
             continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
+        token_geometry_fallback_count = sum(
+            char.source == PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE
+            for char in char_results
+        )
+        stats.latin_token_geometry_fallbacks += token_geometry_fallback_count
         if has_token_disagreement:
             stats.latin_token_text_disagreements += 1
+        review_flags: list[str] = []
+        if token_geometry_fallback_count:
+            review_flags.append(PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG)
+        if has_token_disagreement:
+            review_flags.append(PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG)
         results[segment.key] = _NativeLineResult(
             text=text,
             bbox=union_xyxy(boxes) if boxes else segment.bbox,
             confidence=0.0,
             chars=char_results,
-            source=source,
-            bbox_source="text_latin_masked_line_engcut",
-            review_flags=(
-                [PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG]
-                if has_token_disagreement
-                else []
+            source=(
+                f"{source}+ppocrv6_token_geometry_fallback"
+                if token_geometry_fallback_count
+                else source
             ),
+            bbox_source="text_latin_masked_line_engcut",
+            review_flags=review_flags,
         )
     return results
 
@@ -2138,6 +2230,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = recognize(chunk[0])
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
+            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((chunk[0], route_results))
             continue
@@ -2146,6 +2239,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = future.result()
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
+            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((route, route_results))
     return results
