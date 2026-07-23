@@ -7,9 +7,8 @@ represented by a ``ProofEditCommand`` emitted to the application boundary.
 Interaction model restored from the mature proof workspace (d4c6dfe):
 
 - one row at a time, image and text aligned on the same x axis;
-- a fixed-length slot editor: typing overwrites the current slot, deletion
-  fills blanks, pastes are truncated/padded so text length stays locked to
-  the OCR character geometry;
+- a fixed-length slot editor for fast overwrite, plus an explicit double-click
+  editor for the rare one-source-slot-to-many-proof-characters correction;
 - per-character verdict colouring (never claims "absolutely correct", a user
   edit only adds an underline, it never whitewashes the OCR evidence);
 - a pure keyboard loop: Enter confirms and advances, F5 flags, F6 skips,
@@ -57,6 +56,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
@@ -531,6 +531,29 @@ class _ProofRow:
 # 逐字槽位编辑器（自绘，QTextDocument 仅作文本容器）
 # ─────────────────────────────────────────────────────────────
 
+
+class _ExpandedSlotEdit(QLineEdit):
+    commit_requested = Signal(str)
+    escape_requested = Signal()
+    dismissed = Signal()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape_requested.emit()
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.text():
+                self.commit_requested.emit(self.text())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        super().focusOutEvent(event)
+        self.dismissed.emit()
+
+
 class _SlotLineEditor(QWidget):
     """Per-character slot editor for horizontal proofing.
 
@@ -583,6 +606,13 @@ class _SlotLineEditor(QWidget):
         self._undo_stack: list[tuple[str, int, int]] = []
         self._redo_stack: list[tuple[str, int, int]] = []
         self._max_undo = 100
+        self._expanded_edit_index: int | None = None
+        self._expanded_edit = _ExpandedSlotEdit(self)
+        self._expanded_edit.setObjectName("slotExpandedEdit")
+        self._expanded_edit.hide()
+        self._expanded_edit.commit_requested.connect(self._commit_expanded_edit)
+        self._expanded_edit.escape_requested.connect(self._cancel_expanded_edit)
+        self._expanded_edit.dismissed.connect(self._dismiss_expanded_edit)
         self._apply_document_line_height()
 
     # ── QPlainTextEdit-like API used by the row widget ────────
@@ -615,6 +645,8 @@ class _SlotLineEditor(QWidget):
 
     def setReadOnly(self, read_only: bool) -> None:
         self._read_only = bool(read_only)
+        if self._read_only:
+            self._dismiss_expanded_edit()
         self.setCursor(Qt.CursorShape.ArrowCursor if self._read_only else Qt.CursorShape.IBeamCursor)
 
     def isReadOnly(self) -> bool:
@@ -681,6 +713,7 @@ class _SlotLineEditor(QWidget):
         return QFontMetrics(font).horizontalAdvance(self._visual_text_override) + 16
 
     def setPlainText(self, text: str) -> None:
+        self._dismiss_expanded_edit()
         old = self.toPlainText()
         self._document.setPlainText(text or "")
         self._apply_document_line_height()
@@ -731,6 +764,66 @@ class _SlotLineEditor(QWidget):
     def has_slot_geometry(self) -> bool:
         return bool(self._slot_x_centers)
 
+    def _interaction_cells(self, text: str | None = None) -> list[QRect | None]:
+        """Return non-overlapping visual cells while preserving OCR centers."""
+
+        value = self.toPlainText() if text is None else text
+        if not value:
+            return []
+        centers = self._slot_x_centers or self._fallback_slot_centers(value)
+        if not centers:
+            return [None] * len(value)
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        metrics = QFontMetrics(font)
+        explicit_widths = self._slot_widths is not None
+        geometry_widths = self._slot_widths or [
+            _slot_visual_width(char, metrics) for char in value
+        ]
+        valid = [
+            index
+            for index in range(min(len(value), len(centers)))
+            if centers[index] is not None
+        ]
+        cells: list[QRect | None] = [None] * len(value)
+        if not valid:
+            return cells
+        monotonic = all(
+            float(centers[left]) < float(centers[right])
+            for left, right in zip(valid, valid[1:])
+        )
+        widget_right = max(1, self.width())
+        for position, index in enumerate(valid):
+            center = float(centers[index])
+            geometry_width = (
+                geometry_widths[index]
+                if index < len(geometry_widths)
+                else TEXT_SLOT_MIN_W
+            )
+            geometry_min = TEXT_SLOT_CLIPPED_MIN_W if explicit_widths else TEXT_SLOT_MIN_W
+            geometry_width = max(geometry_min, float(geometry_width))
+            visual_width = _slot_visual_width(value[index], metrics)
+            preferred_width = max(geometry_width, visual_width)
+            if monotonic and position > 0:
+                previous = float(centers[valid[position - 1]])
+                left = (previous + center) / 2.0
+            else:
+                left = center - (preferred_width if monotonic else geometry_width) / 2.0
+            if monotonic and position + 1 < len(valid):
+                following = float(centers[valid[position + 1]])
+                right = (center + following) / 2.0
+            else:
+                right = center + (preferred_width if monotonic else geometry_width) / 2.0
+            left_px = max(0, min(widget_right - 1, int(round(left))))
+            right_px = max(left_px + 1, min(widget_right, int(round(right))))
+            cells[index] = QRect(
+                left_px,
+                2,
+                right_px - left_px,
+                max(1, self.height() - 4),
+            )
+        return cells
+
     def _apply_document_line_height(self) -> None:
         cursor = QTextCursor(self._document)
         cursor.select(QTextCursor.SelectionType.Document)
@@ -751,13 +844,7 @@ class _SlotLineEditor(QWidget):
         centers = self._slot_x_centers or self._fallback_slot_centers(text)
         if not centers:
             return -1
-        if self._slot_widths is not None:
-            widths = self._slot_widths
-        else:
-            font = QFont(self.font())
-            font.setWeight(TEXT_FONT_WEIGHT)
-            fm = QFontMetrics(font)
-            widths = [_slot_visual_width(ch, fm) for ch in text]
+        cells = self._interaction_cells(text)
         best_idx = -1
         best_dist = float("inf")
         first_left: float | None = None
@@ -765,10 +852,11 @@ class _SlotLineEditor(QWidget):
         for idx, center in enumerate(centers):
             if center is None:
                 continue
-            width = widths[idx] if idx < len(widths) else TEXT_SLOT_MIN_W
-            half = max(TEXT_SLOT_MIN_W / 2.0, float(width) / 2.0)
-            left = float(center) - half
-            right = float(center) + half
+            cell = cells[idx] if idx < len(cells) else None
+            if cell is None:
+                continue
+            left = float(cell.left())
+            right = float(cell.right())
             first_left = left if first_left is None else min(first_left, left)
             last_right = right if last_right is None else max(last_right, right)
             if left <= x <= right:
@@ -808,6 +896,44 @@ class _SlotLineEditor(QWidget):
         pos = self._cursor.position()
         return pos, min(pos + 1, len(self.toPlainText()))
 
+    def _open_expanded_edit(self, index: int) -> None:
+        text = self.toPlainText()
+        if self._read_only or index < 0 or index >= len(text):
+            return
+        cells = self._interaction_cells(text)
+        cell = cells[index] if index < len(cells) else None
+        if cell is None:
+            return
+        width = min(max(120, cell.width() * 3), max(1, self.width()))
+        x = max(0, min(self.width() - width, cell.center().x() - width // 2))
+        self._expanded_edit_index = index
+        self._expanded_edit.setGeometry(x, 0, width, self.height())
+        self._expanded_edit.setText(text[index:index + 1])
+        self._expanded_edit.selectAll()
+        self._expanded_edit.show()
+        self._expanded_edit.raise_()
+        self._expanded_edit.setFocus()
+
+    def _commit_expanded_edit(self, replacement: str) -> None:
+        index = self._expanded_edit_index
+        if index is None or not replacement:
+            return
+        self._expanded_edit_index = None
+        self._expanded_edit.hide()
+        self.replace_text_range(index, index + 1, replacement)
+        self.setFocus()
+
+    def _cancel_expanded_edit(self) -> None:
+        if self._expanded_edit_index is None:
+            return
+        self._expanded_edit_index = None
+        self._expanded_edit.hide()
+        self.setFocus()
+
+    def _dismiss_expanded_edit(self) -> None:
+        self._expanded_edit_index = None
+        self._expanded_edit.hide()
+
     def _replace_selected_slots(self, text: str) -> None:
         current = self.toPlainText()
         if not current:
@@ -844,8 +970,8 @@ class _SlotLineEditor(QWidget):
     def replace_text_range(self, start: int, end: int, replacement: str) -> None:
         """Replace a raw text range without fixed-slot truncation.
 
-        Reserved for formula source editing, where the source length is
-        allowed to change.
+        Used only by explicit editing surfaces where a length change is an
+        intentional user action rather than an implicit slot overwrite.
         """
 
         current = self.toPlainText()
@@ -969,11 +1095,7 @@ class _SlotLineEditor(QWidget):
             painter.setFont(font)
             fm = QFontMetrics(font)
             centers = self._slot_x_centers or self._fallback_slot_centers(text)
-            widths = self._slot_widths or [
-                _slot_visual_width(ch, fm)
-                for ch in text
-            ]
-            explicit_widths = self._slot_widths is not None
+            cells = self._interaction_cells(text)
             fg_color, bg_color, underline_color = self._selection_colors()
             if self._active_visual:
                 selected_start, selected_end = self._selection_bounds_for_paint()
@@ -992,11 +1114,9 @@ class _SlotLineEditor(QWidget):
                 center = centers[i]
                 if center is None:
                     continue
-                width = widths[i] if i < len(widths) else TEXT_SLOT_MIN_W
-                min_slot_w = TEXT_SLOT_CLIPPED_MIN_W if explicit_widths else TEXT_SLOT_MIN_W
-                slot_w = max(min_slot_w, float(width))
-                left = int(round(float(center) - slot_w / 2.0))
-                cell = QRect(left, 2, max(1, int(round(slot_w))), self.height() - 4)
+                cell = cells[i] if i < len(cells) else None
+                if cell is None:
+                    continue
                 if i == self._last_hover_idx:
                     painter.fillRect(cell, QColor("#e8f0fe"))
                 if selected_start <= i < selected_end:
@@ -1152,21 +1272,9 @@ class _SlotLineEditor(QWidget):
 
     def _cursor_rect(self) -> QRect:
         pos = self._cursor.selectionStart() if self._cursor.hasSelection() else self._cursor.position()
-        centers = self._slot_x_centers or self._fallback_slot_centers(self.toPlainText())
-        fm = QFontMetrics(self.font())
-        explicit_widths = self._slot_widths is not None
-        widths = self._slot_widths or [
-            _slot_visual_width(ch, fm)
-            for ch in self.toPlainText()
-        ]
-        if 0 <= pos < len(centers):
-            center = centers[pos]
-            if center is not None:
-                width = widths[pos] if pos < len(widths) else TEXT_SLOT_MIN_W
-                min_slot_w = TEXT_SLOT_CLIPPED_MIN_W if explicit_widths else TEXT_SLOT_MIN_W
-                width = max(min_slot_w, float(width))
-                left = int(round(float(center) - width / 2.0))
-                return QRect(left, 2, max(1, int(round(width))), self.height() - 4)
+        cells = self._interaction_cells()
+        if 0 <= pos < len(cells) and cells[pos] is not None:
+            return QRect(cells[pos])
         return QRect(0, 0, 1, self.height())
 
     # ── events ─────────────────────────────────────────────────
@@ -1223,6 +1331,23 @@ class _SlotLineEditor(QWidget):
         if idx >= 0:
             self._select_slot_index(idx)
         self.setFocus()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton or self._read_only:
+            super().mouseDoubleClickEvent(event)
+            return
+        pos = self._event_pos(event)
+        if self._atom_overlay_for_x(float(pos.x())) is not None:
+            super().mouseDoubleClickEvent(event)
+            return
+        index = self._slot_index_for_x(float(pos.x()), nearest=True)
+        if index < 0:
+            super().mouseDoubleClickEvent(event)
+            return
+        self.row_focus_requested.emit()
+        self._select_slot_index(index)
+        self._open_expanded_edit(index)
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         pos = self._event_pos(event)

@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QLineEdit, QListWidgetItem
 
 from app.application.proof_workspace import build_proof_workspace_view
 from app.application.contracts import ProofBatchEditCommand, ProofEditCommand
@@ -399,6 +399,106 @@ def test_hproof_projects_atom_geometry_into_editor_typography(
     reset.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
     assert reset.charFormat().fontLetterSpacing() == 0.0
     panel.close()
+
+
+def test_hproof_interaction_cells_cover_wide_glyph_without_moving_atom_centers(
+    qapp: QApplication,
+) -> None:
+    from PySide6.QtGui import QFont, QTextCursor
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    editor = _SlotLineEditor()
+    editor.resize(120, 40)
+    font = QFont(editor.font())
+    font.setPixelSize(28)
+    editor.setFont(font)
+    editor.setPlainText(")一(")
+    editor.set_slot_geometry([20.0, 50.0, 80.0], [14.0, 4.0, 14.0])
+    editor.set_active_visual(True)
+    cursor = QTextCursor(editor.document())
+    cursor.setPosition(1)
+    cursor.setPosition(2, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    cells = editor._interaction_cells()
+
+    assert all(cell is not None for cell in cells)
+    left_cell, middle_cell, right_cell = cells
+    assert left_cell is not None
+    assert middle_cell is not None
+    assert right_cell is not None
+    assert left_cell.right() + 1 == middle_cell.left()
+    assert middle_cell.right() + 1 == right_cell.left()
+    assert (middle_cell.left(), middle_cell.right()) == (35, 64)
+    assert middle_cell.width() > 4
+    assert editor.slot_geometry() == ([20.0, 50.0, 80.0], [14.0, 4.0, 14.0])
+    assert editor._slot_index_for_x(37.0) == 1
+    assert editor._slot_index_for_x(63.0) == 1
+    assert editor._cursor_rect() == middle_cell
+
+    editor.show()
+    qapp.processEvents()
+    rendered = QPixmap(editor.size())
+    rendered.fill(Qt.GlobalColor.transparent)
+    editor.render(rendered)
+    assert rendered.toImage().pixelColor(37, 10) == QColor("#cfe2ff")
+    editor.close()
+
+
+def test_hproof_double_click_edit_expands_one_slot_without_changing_fast_overwrite(
+    qapp: QApplication,
+) -> None:
+    from PySide6.QtGui import QTextCursor
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    editor = _SlotLineEditor()
+    editor.resize(180, 40)
+    editor.setPlainText("PENC")
+    editor.set_slot_geometry(
+        [20.0, 50.0, 80.0, 110.0],
+        [20.0, 20.0, 12.0, 20.0],
+    )
+    editor.show()
+    qapp.processEvents()
+
+    QTest.mouseDClick(editor, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    qapp.processEvents()
+    assert editor._expanded_edit.isVisible()
+    assert editor._expanded_edit.text() == "N"
+    editor._expanded_edit.setText("/V")
+    QTest.keyClick(editor._expanded_edit, Qt.Key.Key_Return)
+    assert editor.toPlainText() == "PE/VC"
+    assert editor.textCursor().selectedText() == "/V"
+
+    editor.setPlainText("PENC")
+    cursor = QTextCursor(editor.document())
+    cursor.setPosition(2)
+    cursor.setPosition(3, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+    QTest.keyClicks(editor, "/V")
+    assert editor.toPlainText() == "PE/V"
+
+    editor.setPlainText("PENC")
+    editor._open_expanded_edit(2)
+    editor._expanded_edit.setText("/V")
+    QTest.keyClick(editor._expanded_edit, Qt.Key.Key_Escape)
+    assert editor.toPlainText() == "PENC"
+    assert editor._expanded_edit.isHidden()
+
+    editor._open_expanded_edit(2)
+    editor._expanded_edit.setText("")
+    QTest.keyClick(editor._expanded_edit, Qt.Key.Key_Return)
+    assert editor.toPlainText() == "PENC"
+    assert editor._expanded_edit.isVisible()
+
+    other = QLineEdit()
+    other.show()
+    other.setFocus()
+    qapp.processEvents()
+    assert editor._expanded_edit.isHidden()
+    assert editor.toPlainText() == "PENC"
+    other.close()
+    editor.close()
 
 
 def _formula_workspace(workspace, unit, line, state, *, text, line_kind, atoms):
