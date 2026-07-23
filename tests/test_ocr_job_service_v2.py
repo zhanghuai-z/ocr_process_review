@@ -80,24 +80,43 @@ class _Prepass:
 class _Engine:
     engine_id = "charocr-test"
 
+    def __init__(self, *, include_pp_symbol: bool = False) -> None:
+        self._include_pp_symbol = include_pp_symbol
+
     def recognize_page(self, _image, request, progress_callback=None):
+        atoms = [
+            CharOcrAtomObservation(
+                text="machine", bbox=(2, 3, 30, 15), confidence=0.8, source="test",
+                granularity="word", token_text="machine",
+                candidates=(CharOcrCandidateObservation(
+                    text="rnachine",
+                    confidence=0.0,
+                    source="ppocrv6:latin_token_text_alignment",
+                    bbox=(3, 4, 29, 14),
+                ),),
+            ),
+        ]
+        if self._include_pp_symbol:
+            atoms.append(CharOcrAtomObservation(
+                text="、", bbox=(32, 9, 38, 15), confidence=0.0,
+                source="ppocrv6:symbol_foreground_observation",
+                token_text="、",
+                candidates=(CharOcrCandidateObservation(
+                    text="、",
+                    confidence=0.0,
+                    source="ppocrv6:symbol_foreground_observation",
+                    bbox=(32, 9, 38, 15),
+                ),),
+            ))
         return CharOcrPageResult(
             page_uid=request.page.uid,
             input_fingerprint=request.input_fingerprint,
             regions=(CharOcrRegionObservation(
                 block_uid="block-1", label="text", bbox=(1, 2, 41, 22), source="test",
                 lines=(CharOcrLineObservation(
-                    text="machine", bbox=(2, 3, 30, 15), confidence=0.9, source="test",
-                    atoms=(CharOcrAtomObservation(
-                        text="machine", bbox=(2, 3, 30, 15), confidence=0.8, source="test",
-                        granularity="word", token_text="machine",
-                        candidates=(CharOcrCandidateObservation(
-                            text="rnachine",
-                            confidence=0.0,
-                            source="ppocrv6:latin_token_text_alignment",
-                            bbox=(3, 4, 29, 14),
-                        ),),
-                    ),),
+                    text="machine、" if self._include_pp_symbol else "machine",
+                    bbox=(2, 3, 38, 15) if self._include_pp_symbol else (2, 3, 30, 15),
+                    confidence=0.9, source="test", atoms=tuple(atoms),
                 ),),
             ),),
         )
@@ -113,7 +132,10 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     )
     monkeypatch.setattr(module, "acquire_routing_observation_bundle", lambda **_kwargs: object())
     monkeypatch.setattr(module, "compile_page_routing_plan", lambda *_args, **_kwargs: routing)
-    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+    service = OcrJobService(
+        prepass_client=_Prepass(), vl_client=object(),
+        engine=_Engine(include_pp_symbol=True),
+    )
 
     commit = service.run_page(session, "page-1", np.zeros((80, 100, 3), dtype=np.uint8))
 
@@ -129,6 +151,10 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     assert candidate.text == "rnachine"
     assert candidate.source == "ppocrv6:latin_token_text_alignment"
     assert candidate.bbox == (3, 4, 29, 14)
+    symbol = session.ocr_observation_repository.get_atom(batch.atom_uids[1])
+    assert symbol.text == "、"
+    assert symbol.bbox == (32, 9, 38, 15)
+    assert symbol.source == "ppocrv6:symbol_foreground_observation"
     proof = session.proof_repository.get_state("proof-1")
     assert proof.text_units[0].text == "human correction"
     assert proof.rebind_required is True
@@ -141,7 +167,7 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     assert workspace.line_count == 1
     assert workspace.pages[0].batch_uid == commit.batch_uid
     assert workspace.pages[0].regions[0].block_uid == "block-1"
-    assert workspace.pages[0].regions[0].lines[0].text == "machine"
+    assert workspace.pages[0].regions[0].lines[0].text == "machine、"
     assert workspace.pages[0].regions[0].lines[0].atoms[0].text == "machine"
 
 

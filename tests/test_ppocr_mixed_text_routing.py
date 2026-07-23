@@ -155,7 +155,9 @@ def test_single_latin_token_reclaims_italic_j_stem_from_weak_cjk_cell_owner():
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
     assert result.issues == ()
-    assert result.diagnostics == ()
+    assert [item.code for item in result.diagnostics] == [
+        "single_latin_token_geometry_completed",
+    ]
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [
         ((48, 8, 67, 43), "j"),
@@ -187,14 +189,37 @@ def test_single_latin_token_does_not_guess_between_competing_stem_components():
 
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
-    assert result.issues == ()
-    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
-    assert [(segment.bbox, segment.text) for segment in latin] == [
-        ((62, 8, 67, 13), "j"),
-    ]
-    assert [item.code for item in result.diagnostics] == [
+    assert result.segments == ()
+    assert [item.code for item in result.issues] == [
         "incomplete_single_latin_token_ink",
     ]
+    assert result.diagnostics == ()
+
+
+def test_single_latin_token_does_not_reclaim_one_wide_weak_cjk_component():
+    image = _image()
+    _ink(image, (10, 8, 30, 42))
+    _ink(image, (34, 18, 61, 43))      # wide weak CJK component
+    _ink(image, (62, 8, 67, 13))       # only strongly owned j fragment
+    _ink(image, (85, 8, 105, 42))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="业j的",
+        bbox=(0, 0, 120, 50),
+        words=(
+            PpOcrV6WordBox(0, 0, "业", (8, 6, 60, 44)),
+            PpOcrV6WordBox(0, 1, "j", (58, 6, 72, 44)),
+            PpOcrV6WordBox(0, 2, "的", (82, 6, 108, 44)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.segments == ()
+    assert [item.code for item in result.issues] == [
+        "incomplete_single_latin_token_ink",
+    ]
+    assert result.diagnostics == ()
 
 
 def test_latin_stem_is_not_split_by_preceding_period_space_token():

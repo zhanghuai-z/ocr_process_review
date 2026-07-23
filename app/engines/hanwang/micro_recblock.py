@@ -222,7 +222,8 @@ class RunStats:
     geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
     latin_token_text_disagreements: int = 0
-    ppocr_symbol_observations_bound: int = 0
+    ppocr_symbol_candidates_bound: int = 0
+    ppocr_symbol_atoms_inserted: int = 0
     ppocr_symbol_observations_unbound: int = 0
     vl_marker_observations_bound: int = 0
     vl_marker_observations_unbound: int = 0
@@ -556,16 +557,90 @@ def _merge_physical_routing_line(
     )]
 
 
-def _attach_ppocr_symbol_candidates(
+@dataclass(frozen=True)
+class _PpSymbolApplicationStats:
+    candidates_bound: int = 0
+    atoms_inserted: int = 0
+    observations_unbound: int = 0
+
+
+def _apply_ppocr_symbol_observations(
     lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation, ...],
-) -> tuple[list[_NativeLineResult], int, int]:
-    """Retain a uniquely bound PP symbol observation or missing native atom."""
-    return _attach_owned_text_candidates(
-        lines,
-        observations,
-        source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
-        insert_missing_native_atom=True,
+) -> tuple[list[_NativeLineResult], _PpSymbolApplicationStats]:
+    """Bind PP symbols to native atoms or insert an observed missing glyph."""
+
+    if not lines or not observations:
+        return lines, _PpSymbolApplicationStats(
+            observations_unbound=len(observations),
+        )
+    candidates_bound = 0
+    atoms_inserted = 0
+    observations_unbound = 0
+    for observation in sorted(observations, key=lambda item: (item.bbox[0], item.bbox[1])):
+        center_x, center_y = _bbox_center(observation.bbox)
+        owners = [
+            index
+            for index, line in enumerate(lines)
+            if line.bbox[0] <= center_x < line.bbox[2]
+            and line.bbox[1] <= center_y < line.bbox[3]
+        ]
+        if len(owners) != 1:
+            observations_unbound += 1
+            continue
+        line = lines[owners[0]]
+        claimed = [
+            index
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+            and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
+            and _intersect_xyxy(char.bbox, observation.bbox) is not None
+        ]
+        intersecting = [
+            index
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+            and _intersect_xyxy(char.bbox, observation.bbox) is not None
+        ]
+        if len(claimed) == 1:
+            candidates_bound += 1
+            char = line.chars[claimed[0]]
+            if char.text != observation.text:
+                candidate = CharOcrCandidateObservation(
+                    text=observation.text,
+                    confidence=0.0,
+                    source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+                    bbox=observation.bbox,
+                )
+                if candidate not in char.external_candidates:
+                    char.external_candidates.append(candidate)
+            continue
+        if claimed or intersecting:
+            observations_unbound += 1
+            continue
+        insertion = next((
+            index
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+            and _bbox_center(char.bbox)[0] > center_x
+        ), len(line.chars))
+        line.chars.insert(insertion, _NativeAtomResult(
+            text=observation.text,
+            confidence=0.0,
+            bbox=observation.bbox,
+            candidates=[observation.text],
+            source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+            bbox_granularity="char",
+            token_text=observation.text,
+        ))
+        line.text = _line_chars_text(line.chars).strip()
+        if "ppocr_symbol_missing_native_atom" not in line.review_flags:
+            line.review_flags.append("ppocr_symbol_missing_native_atom")
+        atoms_inserted += 1
+    return lines, _PpSymbolApplicationStats(
+        candidates_bound=candidates_bound,
+        atoms_inserted=atoms_inserted,
+        observations_unbound=observations_unbound,
     )
 
 
@@ -586,7 +661,6 @@ def _attach_owned_text_candidates(
     observations: tuple[PpOcrSymbolObservation | VlSemanticMarkerObservation, ...],
     *,
     source: str,
-    insert_missing_native_atom: bool = False,
 ) -> tuple[list[_NativeLineResult], int, int]:
     if not lines or not observations:
         return lines, 0, len(observations)
@@ -611,31 +685,6 @@ def _attach_owned_text_candidates(
             and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
         ]
-        intersecting = [
-            index
-            for index, char in enumerate(line.chars)
-            if char.bbox is not None
-            and _intersect_xyxy(char.bbox, observation.bbox) is not None
-        ]
-        if len(claimed) == 0 and insert_missing_native_atom and not intersecting:
-            insertion = next((
-                index
-                for index, char in enumerate(line.chars)
-                if char.bbox is not None
-                and _bbox_center(char.bbox)[0] > center_x
-            ), len(line.chars))
-            line.chars.insert(insertion, _NativeAtomResult(
-                text=observation.text,
-                confidence=0.0,
-                bbox=observation.bbox,
-                candidates=[observation.text],
-                source=source,
-                bbox_granularity="char" if len(observation.text) == 1 else "word",
-                token_text=observation.text,
-            ))
-            line.text = _line_chars_text(line.chars).strip()
-            bound += 1
-            continue
         if len(claimed) != 1:
             unbound += 1
             continue
@@ -654,12 +703,12 @@ def _attach_owned_text_candidates(
     return lines, bound, unbound
 
 
-def _attach_route_observation_candidates(
+def _apply_route_text_observations(
     lines: list[_NativeLineResult],
     route: RoutingLine,
     stats: RunStats,
 ) -> list[_NativeLineResult]:
-    lines, pp_bound, pp_unbound = _attach_ppocr_symbol_candidates(
+    lines, pp_stats = _apply_ppocr_symbol_observations(
         lines,
         route.ppocr_symbol_observations,
     )
@@ -667,8 +716,9 @@ def _attach_route_observation_candidates(
         lines,
         route.vl_marker_observations,
     )
-    stats.ppocr_symbol_observations_bound += pp_bound
-    stats.ppocr_symbol_observations_unbound += pp_unbound
+    stats.ppocr_symbol_candidates_bound += pp_stats.candidates_bound
+    stats.ppocr_symbol_atoms_inserted += pp_stats.atoms_inserted
+    stats.ppocr_symbol_observations_unbound += pp_stats.observations_unbound
     stats.vl_marker_observations_bound += vl_bound
     stats.vl_marker_observations_unbound += vl_unbound
     return lines
@@ -856,7 +906,7 @@ def _assemble_layout_route_line(
         merged_text_lines: list[_NativeLineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _attach_route_observation_candidates(
+        return _apply_route_text_observations(
             _merge_physical_routing_line(
                 merged_text_lines,
                 route_bbox=route.bbox,
@@ -951,7 +1001,7 @@ def _assemble_layout_route_line(
                 review_flags=sorted(flags),
             )
         )
-    return _attach_route_observation_candidates(assembled, route, stats)
+    return _apply_route_text_observations(assembled, route, stats)
 
 
 def _assemble_routing_lines(

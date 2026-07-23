@@ -470,27 +470,36 @@ def test_hanwang_keeps_unbound_pp_symbol_out_of_charocr_text():
     assert lines[0].chars[0].bbox == native_bbox
     assert lines[0].chars[0].source == "hanwang:micro_recblock"
     assert lines[0].chars[0].external_candidates == []
-    assert stats.ppocr_symbol_observations_bound == 0
+    assert stats.ppocr_symbol_candidates_bound == 0
+    assert stats.ppocr_symbol_atoms_inserted == 0
     assert stats.ppocr_symbol_observations_unbound == 1
 
 
 def test_hanwang_inserts_uniquely_owned_pp_symbol_missing_from_native_atoms():
     import app.engines.hanwang.micro_recblock as micro_module
 
-    observation_bbox = (46, 24, 52, 31)
+    first_bbox = (46, 24, 52, 31)
+    second_bbox = (84, 24, 90, 31)
     route = RoutingLine(
         index=0,
-        bbox=(0, 0, 100, 40),
-        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
-        ppocr_symbol_observations=(PpOcrSymbolObservation(
-            text="、",
-            bbox=observation_bbox,
-            proposal_bbox=(42, 6, 56, 36),
-        ),),
+        bbox=(0, 0, 140, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 140, 40)),),
+        ppocr_symbol_observations=(
+            PpOcrSymbolObservation(
+                text="、",
+                bbox=second_bbox,
+                proposal_bbox=(80, 6, 94, 36),
+            ),
+            PpOcrSymbolObservation(
+                text="、",
+                bbox=first_bbox,
+                proposal_bbox=(42, 6, 56, 36),
+            ),
+        ),
     )
     grouped = {(0, 0, 0): [micro_module._NativeLineResult(
-        text="jp",
-        bbox=(0, 0, 100, 40),
+        text="jpt",
+        bbox=(0, 0, 140, 40),
         chars=[
             micro_module._NativeAtomResult(
                 text="j",
@@ -500,6 +509,11 @@ def test_hanwang_inserts_uniquely_owned_pp_symbol_missing_from_native_atoms():
             micro_module._NativeAtomResult(
                 text="p",
                 bbox=(62, 8, 78, 32),
+                source="hanwang:micro_recblock",
+            ),
+            micro_module._NativeAtomResult(
+                text="t",
+                bbox=(100, 8, 116, 32),
                 source="hanwang:micro_recblock",
             ),
         ],
@@ -514,19 +528,50 @@ def test_hanwang_inserts_uniquely_owned_pp_symbol_missing_from_native_atoms():
         stats=stats,
     )
 
-    assert lines[0].text == "j、p"
-    assert [char.text for char in lines[0].chars] == ["j", "、", "p"]
+    assert lines[0].text == "j、p、t"
+    assert [char.text for char in lines[0].chars] == ["j", "、", "p", "、", "t"]
     inserted = lines[0].chars[1]
-    assert inserted.bbox == observation_bbox
+    assert inserted.bbox == first_bbox
     assert inserted.source == "ppocrv6:symbol_foreground_observation"
     assert inserted.token_text == "、"
-    assert stats.ppocr_symbol_observations_bound == 1
+    assert lines[0].review_flags == ["ppocr_symbol_missing_native_atom"]
+    assert stats.ppocr_symbol_candidates_bound == 0
+    assert stats.ppocr_symbol_atoms_inserted == 2
     assert stats.ppocr_symbol_observations_unbound == 0
     observed = micro_module._native_line_observation(lines[0])
-    assert observed.text == "j、p"
+    assert observed.text == "j、p、t"
     assert observed.atoms[1].text == "、"
-    assert observed.atoms[1].bbox == observation_bbox
+    assert observed.atoms[1].bbox == first_bbox
     assert observed.atoms[1].source == "ppocrv6:symbol_foreground_observation"
+    metrics = dict(micro_module._stats_metrics(stats))
+    assert metrics["ppocr_symbol_candidates_bound"] == "0"
+    assert metrics["ppocr_symbol_atoms_inserted"] == "2"
+    assert metrics["ppocr_symbol_observations_unbound"] == "0"
+
+
+def test_hanwang_does_not_insert_pp_symbol_owned_by_overlapping_lines():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    observation = PpOcrSymbolObservation(
+        text="、",
+        bbox=(46, 24, 52, 31),
+        proposal_bbox=(42, 6, 56, 36),
+    )
+    lines = [
+        micro_module._NativeLineResult(text="甲", bbox=(0, 0, 100, 40), chars=[]),
+        micro_module._NativeLineResult(text="乙", bbox=(0, 20, 100, 60), chars=[]),
+    ]
+
+    result, stats = micro_module._apply_ppocr_symbol_observations(
+        lines,
+        (observation,),
+    )
+
+    assert [line.text for line in result] == ["甲", "乙"]
+    assert all(line.chars == [] for line in result)
+    assert stats.candidates_bound == 0
+    assert stats.atoms_inserted == 0
+    assert stats.observations_unbound == 1
 
 
 def test_hanwang_saves_uniquely_bound_pp_symbol_as_external_candidate():
@@ -575,7 +620,8 @@ def test_hanwang_saves_uniquely_bound_pp_symbol_as_external_candidate():
             bbox=observation_bbox,
         )
     ]
-    assert stats.ppocr_symbol_observations_bound == 1
+    assert stats.ppocr_symbol_candidates_bound == 1
+    assert stats.ppocr_symbol_atoms_inserted == 0
     assert stats.ppocr_symbol_observations_unbound == 0
     observed = micro_module._native_line_observation(lines[0])
     assert observed.text == "N"
