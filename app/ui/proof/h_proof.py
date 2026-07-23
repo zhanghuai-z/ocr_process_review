@@ -231,6 +231,28 @@ def _slot_visual_width(text_char: str, font_metrics: QFontMetrics) -> float:
     return max(TEXT_SLOT_MIN_W, glyph_width)
 
 
+def _fit_glyph_font(text_char: str, font: QFont, max_ink_width: float) -> QFont:
+    """Shrink one overflowing glyph to its atom width without clipping it."""
+
+    fitted = QFont(font)
+    available = max(1, int(max_ink_width))
+    metrics = QFontMetrics(fitted)
+    ink_width = metrics.tightBoundingRect(text_char).width()
+    if ink_width <= available:
+        return fitted
+    base_pixel_size = fitted.pixelSize()
+    if base_pixel_size <= 0:
+        base_pixel_size = max(1, metrics.height())
+    target_size = max(1, int(base_pixel_size * available / ink_width))
+    fitted.setPixelSize(target_size)
+    while (
+        fitted.pixelSize() > 1
+        and QFontMetrics(fitted).tightBoundingRect(text_char).width() > available
+    ):
+        fitted.setPixelSize(fitted.pixelSize() - 1)
+    return fitted
+
+
 def _is_punctuation_slot_text(text: str) -> bool:
     """Whether a slot should draw text centered inside its visual cell."""
 
@@ -1130,32 +1152,28 @@ class _SlotLineEditor(QWidget):
                 color = fg_color.get(i) or self.palette().text().color()
                 painter.setPen(QPen(color, 1))
                 ch = text[i]
-                glyph_clip: QRect | None = None
+                glyph_font = font
                 if self._slot_widths is not None and i < len(self._slot_widths):
                     atom_width = max(1.0, float(self._slot_widths[i]))
-                    atom_left = int(round(float(center) - atom_width / 2.0))
-                    atom_right = int(round(float(center) + atom_width / 2.0))
-                    glyph_clip = QRect(
-                        atom_left,
-                        0,
-                        max(1, atom_right - atom_left),
-                        self.height(),
-                    )
-                    painter.save()
-                    painter.setClipRect(
-                        glyph_clip,
-                        Qt.ClipOperation.IntersectClip,
-                    )
-                if _is_punctuation_slot_text(ch):
-                    ink = fm.tightBoundingRect(ch)
+                    glyph_font = _fit_glyph_font(ch, font, atom_width)
+                glyph_fm = QFontMetrics(glyph_font)
+                painter.setFont(glyph_font)
+                if glyph_font.pixelSize() != font.pixelSize():
+                    ink = glyph_fm.tightBoundingRect(ch)
+                    tx = float(center) - ink.width() / 2.0 - ink.left()
+                    glyph_baseline = (
+                        self.height() + glyph_fm.ascent() - glyph_fm.descent()
+                    ) // 2
+                    painter.drawText(int(round(tx)), glyph_baseline, ch)
+                elif _is_punctuation_slot_text(ch):
+                    ink = glyph_fm.tightBoundingRect(ch)
                     tx = float(center) - ink.width() / 2.0 - ink.left()
                     painter.drawText(int(round(tx)), y_baseline, ch)
                 else:
-                    char_w = fm.horizontalAdvance(ch)
+                    char_w = glyph_fm.horizontalAdvance(ch)
                     tx = int(round(float(center) - char_w / 2.0))
                     painter.drawText(tx, y_baseline, ch)
-                if glyph_clip is not None:
-                    painter.restore()
+                painter.setFont(font)
                 underline = underline_color.get(i)
                 if underline is not None:
                     painter.setPen(QPen(underline, 1))

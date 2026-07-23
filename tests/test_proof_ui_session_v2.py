@@ -445,17 +445,23 @@ def test_hproof_interaction_cells_cover_wide_glyph_without_moving_atom_centers(
     editor.close()
 
 
-def test_hproof_clips_glyph_ink_to_atom_without_resizing_font(
+def test_hproof_shrinks_overflowing_glyph_to_atom_without_clipping(
     qapp: QApplication,
 ) -> None:
-    from PySide6.QtGui import QFont
-    from app.ui.proof.h_proof import _SlotLineEditor
+    from PySide6.QtGui import QFont, QFontMetrics
+    from app.ui.proof.h_proof import _fit_glyph_font, _SlotLineEditor
+
+    base_font = QFont()
+    base_font.setPixelSize(28)
+    fitted_font = _fit_glyph_font("一", base_font, 4.0)
+    assert fitted_font.pixelSize() < base_font.pixelSize()
+    assert QFontMetrics(fitted_font).tightBoundingRect("一").width() <= 4
+    assert _fit_glyph_font("i", base_font, 20.0).pixelSize() == 28
 
     def render(text: str) -> QImage:
         editor = _SlotLineEditor()
         editor.resize(100, 40)
-        font = QFont(editor.font())
-        font.setPixelSize(28)
+        font = QFont(base_font)
         editor.setFont(font)
         editor.setPlainText(text)
         editor.set_slot_geometry([50.0], [4.0])
