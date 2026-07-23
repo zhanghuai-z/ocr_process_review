@@ -1130,6 +1130,22 @@ class _SlotLineEditor(QWidget):
                 color = fg_color.get(i) or self.palette().text().color()
                 painter.setPen(QPen(color, 1))
                 ch = text[i]
+                glyph_clip: QRect | None = None
+                if self._slot_widths is not None and i < len(self._slot_widths):
+                    atom_width = max(1.0, float(self._slot_widths[i]))
+                    atom_left = int(round(float(center) - atom_width / 2.0))
+                    atom_right = int(round(float(center) + atom_width / 2.0))
+                    glyph_clip = QRect(
+                        atom_left,
+                        0,
+                        max(1, atom_right - atom_left),
+                        self.height(),
+                    )
+                    painter.save()
+                    painter.setClipRect(
+                        glyph_clip,
+                        Qt.ClipOperation.IntersectClip,
+                    )
                 if _is_punctuation_slot_text(ch):
                     ink = fm.tightBoundingRect(ch)
                     tx = float(center) - ink.width() / 2.0 - ink.left()
@@ -1138,6 +1154,8 @@ class _SlotLineEditor(QWidget):
                     char_w = fm.horizontalAdvance(ch)
                     tx = int(round(float(center) - char_w / 2.0))
                     painter.drawText(tx, y_baseline, ch)
+                if glyph_clip is not None:
+                    painter.restore()
                 underline = underline_color.get(i)
                 if underline is not None:
                     painter.setPen(QPen(underline, 1))

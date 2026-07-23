@@ -445,6 +445,41 @@ def test_hproof_interaction_cells_cover_wide_glyph_without_moving_atom_centers(
     editor.close()
 
 
+def test_hproof_clips_glyph_ink_to_atom_without_resizing_font(
+    qapp: QApplication,
+) -> None:
+    from PySide6.QtGui import QFont
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    def render(text: str) -> QImage:
+        editor = _SlotLineEditor()
+        editor.resize(100, 40)
+        font = QFont(editor.font())
+        font.setPixelSize(28)
+        editor.setFont(font)
+        editor.setPlainText(text)
+        editor.set_slot_geometry([50.0], [4.0])
+        editor.show()
+        qapp.processEvents()
+        rendered = QImage(editor.size(), QImage.Format.Format_ARGB32)
+        rendered.fill(Qt.GlobalColor.transparent)
+        editor.render(rendered)
+        editor.close()
+        return rendered
+
+    glyph = render("一")
+    blank = render(" ")
+    differing_pixels = [
+        (x, y)
+        for y in range(glyph.height())
+        for x in range(glyph.width())
+        if glyph.pixelColor(x, y) != blank.pixelColor(x, y)
+    ]
+
+    assert differing_pixels
+    assert all(48 <= x < 52 for x, _y in differing_pixels)
+
+
 def test_hproof_double_click_edit_expands_one_slot_without_changing_fast_overwrite(
     qapp: QApplication,
 ) -> None:
