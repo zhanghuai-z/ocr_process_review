@@ -1,7 +1,7 @@
 """Single application boundary for the active OCR workbench session."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from app.application.contracts import (
@@ -16,7 +16,12 @@ from app.application.contracts import (
 )
 from app.application.layout_workspace import build_layout_workspace_view
 from app.application.ocr_workspace import OcrWorkspaceView, build_ocr_workspace_view
-from app.application.proof_workspace import ProofWorkspaceView, build_proof_workspace_view
+from app.application.proof_workspace import (
+    ProofWorkspacePatch,
+    ProofWorkspaceView,
+    build_proof_workspace_patch,
+    build_proof_workspace_view,
+)
 from app.core.workflow_state import (
     PageGateInfo,
     active_line_count,
@@ -148,6 +153,12 @@ class WorkbenchApplication:
 
     def proof_workspace(self, *, proof_uid: str | None = None) -> ProofWorkspaceView:
         return build_proof_workspace_view(self._require_session(), proof_uid=proof_uid)
+
+    def proof_workspace_patch(
+        self,
+        changes: Mapping[str, Iterable[str]],
+    ) -> ProofWorkspacePatch:
+        return build_proof_workspace_patch(self._require_session(), changes)
 
     def prepare_import(self, paths: Iterable[str | Path]) -> ImportJobRequest:
         session = self._require_session()

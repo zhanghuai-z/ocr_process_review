@@ -60,7 +60,9 @@ from app.application.proof_workspace import (
     ProofPageView,
     ProofStateView,
     ProofTextUnitView,
+    ProofWorkspacePatch,
     ProofWorkspaceView,
+    apply_proof_workspace_patch,
 )
 from app.ui.proof.char_verdict import COLOR_ERROR, COLOR_LIKELY_OK
 from app.ui.proof.confidence_view import ProofCharView, build_char_views
@@ -554,6 +556,10 @@ class VProofPanel(QWidget):
         # occurrence, Esc collapses the selection back to the current item.
         scoped("Alt+Right", self._gallery, lambda: self._step_gallery(1))
         scoped("Alt+Left", self._gallery, lambda: self._step_gallery(-1))
+        scoped("Ctrl+Alt+Right", self._gallery, lambda: self._step_gallery(1))
+        scoped("Ctrl+Alt+Left", self._gallery, lambda: self._step_gallery(-1))
+        scoped("Shift+Alt+Right", self._gallery, lambda: self._toggle_adjacent_gallery(1))
+        scoped("Shift+Alt+Left", self._gallery, lambda: self._toggle_adjacent_gallery(-1))
         scoped("Alt+Down", self._gallery, lambda: self._step_gallery_row(1))
         scoped("Alt+Up", self._gallery, lambda: self._step_gallery_row(-1))
         scoped("Ctrl+A", self._gallery, self._select_all_gallery)
@@ -594,9 +600,24 @@ class VProofPanel(QWidget):
                     self._lines[(state.proof_uid, unit.text_unit_uid)] = line
                     self._units[(state.proof_uid, unit.text_unit_uid)] = unit
                     entries.extend(build_char_views(line, page))
-        self._entries = tuple(
-            sorted(entries, key=lambda item: (item.page_number, item.proof_uid, item.text_unit_uid, item.char_index))
-        )
+        self._install_entries(entries, restore_tokens=restore_tokens, restore_keys=restore_keys)
+
+    def _install_entries(
+        self,
+        entries: list[ProofCharView] | tuple[ProofCharView, ...],
+        *,
+        restore_tokens: tuple[str, ...] | list[str] = (),
+        restore_keys: tuple[tuple[str, str, int, str | None], ...] = (),
+    ) -> None:
+        self._entries = tuple(sorted(
+            entries,
+            key=lambda item: (
+                item.page_number,
+                item.proof_uid,
+                item.text_unit_uid,
+                item.char_index,
+            ),
+        ))
         grouped: dict[str, list[ProofCharView]] = defaultdict(list)
         for entry in self._entries:
             grouped[entry.text].append(entry)
@@ -625,6 +646,41 @@ class VProofPanel(QWidget):
         else:
             self._status.setText(f"{len(self._entries)} 个字符")
             self._status.setStyleSheet("")
+
+    def apply_workspace_patch(self, patch: ProofWorkspacePatch) -> None:
+        """Re-index only the proof text units named by a committed patch."""
+
+        if self._workspace is None:
+            raise RuntimeError("cannot apply a proof patch without a workspace")
+        restore_tokens = self._selected_tokens_for_restore()
+        restore_keys = tuple(_entry_key(entry) for entry in self._selected_entries())
+        self._workspace = apply_proof_workspace_patch(self._workspace, patch)
+        self._states = {state.proof_uid: state for state in self._workspace.proof_states}
+        changed_keys = {
+            (state.proof_uid, unit.text_unit_uid)
+            for state in patch.states
+            for unit in state.text_units
+        }
+        entries = [
+            entry
+            for entry in self._entries
+            if (entry.proof_uid, entry.text_unit_uid) not in changed_keys
+        ]
+        for key in changed_keys:
+            self._lines.pop(key, None)
+            self._units.pop(key, None)
+            state = self._states[key[0]]
+            unit = next(item for item in state.text_units if item.text_unit_uid == key[1])
+            line = next(item for item in state.lines if item.text_unit_uid == key[1])
+            if line.render_kind != "text":
+                continue
+            page = self._pages.get(state.page_uid)
+            if page is None:
+                raise ValueError(f"proof state {state.proof_uid!r} has no page view")
+            self._lines[key] = line
+            self._units[key] = unit
+            entries.extend(build_char_views(line, page))
+        self._install_entries(entries, restore_tokens=restore_tokens, restore_keys=restore_keys)
 
     def _prune_page_pixmap_cache(self) -> None:
         """Drop cached page pixmaps whose page vanished or whose image changed."""
@@ -976,6 +1032,17 @@ class VProofPanel(QWidget):
 
     def _step_gallery_row(self, delta: int) -> None:
         self._step_gallery(delta * self._gallery_items_per_row())
+
+    def _toggle_adjacent_gallery(self, delta: int) -> None:
+        """Toggle the adjacent occurrence while preserving the current item."""
+
+        count = self._gallery.count()
+        if count <= 0:
+            return
+        row = self._gallery.currentRow()
+        row = 0 if row < 0 else (row + delta) % count
+        item = self._gallery.item(row)
+        item.setSelected(not item.isSelected())
 
     def _select_all_gallery(self) -> None:
         self._gallery.selectAll()

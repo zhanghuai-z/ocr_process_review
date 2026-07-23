@@ -44,19 +44,6 @@ class CharOcrInputRow:
         if self.order < 0:
             raise ValueError("CharOCR input row order must be non-negative")
 
-    def native_payload(self) -> dict[str, object]:
-        """Materialize the minimal dictionary understood by the native adapter."""
-        return {
-            "block_label": self.label,
-            "source_label": self.label,
-            "block_bbox": list(self.bbox),
-            "block_content": self.content,
-            "_layout_block_uid": self.block_uid,
-            "_layout_block_source": self.authorship.value,
-            "_layout_ocr_policy": self.ocr_policy.value,
-        }
-
-
 @dataclass(frozen=True, slots=True)
 class CharOcrPageRequest:
     """One complete immutable native execution input."""

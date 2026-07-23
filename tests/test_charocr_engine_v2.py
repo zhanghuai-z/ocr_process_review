@@ -161,10 +161,11 @@ def test_hanwang_engine_uses_only_native_request_rows_and_returns_observations()
         captured["rows"] = native_rows
         captured["routing_plan"] = kwargs["routing_plan"]
         assert "page" not in kwargs
-        assert [row["_layout_block_uid"] for row in native_rows] == [
+        assert [row.block_uid for row in native_rows] == [
             "row-text",
             "row-formula",
         ]
+        assert all(isinstance(row, CharOcrInputRow) for row in native_rows)
         assert (
             kwargs["routing_plan"]
             .for_block("row-formula")

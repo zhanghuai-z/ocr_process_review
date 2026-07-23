@@ -12,9 +12,11 @@ when an external JavaScript or TeX executor is unavailable.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 import atexit
+import hashlib
 import os
 from pathlib import Path
 from queue import Empty, Queue
@@ -26,7 +28,7 @@ import json
 from threading import Lock, Thread
 
 import numpy as np
-from PySide6.QtCore import QByteArray, QRectF, Qt
+from PySide6.QtCore import QByteArray, QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
@@ -150,6 +152,152 @@ class FormulaRenderResult:
     backend: str
 
 
+@dataclass(frozen=True)
+class FormulaRenderPayload:
+    """Thread-safe renderer output awaiting GUI-thread pixmap materialization."""
+
+    source_hash: str
+    normalized_latex: str
+    backend: str
+    kind: str
+    data: bytes
+    width: int = 0
+    height: int = 0
+
+
+@dataclass(frozen=True)
+class FormulaPreviewResult:
+    source_hash: str
+    payload: FormulaRenderPayload | None
+    error: str = ""
+
+
+def formula_source_hash(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+class FormulaPreviewService(QObject):
+    """Serialize slow formula rendering away from the GUI thread."""
+
+    completed = Signal(object)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._lock = Lock()
+        self._pending: set[tuple[object, ...]] = set()
+        self._cache: OrderedDict[tuple[object, ...], FormulaPreviewResult] = OrderedDict()
+        self._closed = False
+        self._requests: Queue[tuple[tuple[object, ...], tuple[object, ...]] | None] = Queue()
+        self._worker = Thread(
+            target=self._run,
+            daemon=True,
+            name="formula-preview",
+        )
+        self._worker.start()
+
+    def request(
+        self,
+        text: str,
+        *,
+        color: str = "#2C2C2C",
+        dpi: int = 180,
+        oversample: float = 2.0,
+        device_pixel_ratio: float = 1.0,
+    ) -> str:
+        source = str(text or "")
+        source_hash = formula_source_hash(source)
+        engine = _formula_engine()
+        key = (
+            source_hash,
+            color,
+            int(dpi),
+            float(oversample),
+            float(device_pixel_ratio),
+            engine,
+        )
+        cached: FormulaPreviewResult | None
+        with self._lock:
+            if self._closed:
+                return source_hash
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+            if cached is None and key in self._pending:
+                return source_hash
+            if cached is None:
+                self._pending.add(key)
+        if cached is not None:
+            self.completed.emit(cached)
+            return source_hash
+        self._requests.put(
+            (
+                key,
+                (
+                    source,
+                    source_hash,
+                    color,
+                    int(dpi),
+                    float(oversample),
+                    float(device_pixel_ratio),
+                    engine,
+                ),
+            )
+        )
+        return source_hash
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._pending.clear()
+        self._requests.put(None)
+
+    def _run(self) -> None:
+        while True:
+            request = self._requests.get()
+            if request is None:
+                return
+            key, args = request
+            try:
+                payload = _render_formula_payload(
+                    str(args[0]),
+                    source_hash=str(args[1]),
+                    color=str(args[2]),
+                    dpi=int(args[3]),
+                    oversample=float(args[4]),
+                    device_pixel_ratio=float(args[5]),
+                    engine=str(args[6]),
+                )
+                result = FormulaPreviewResult(source_hash=payload.source_hash, payload=payload)
+            except Exception as exc:
+                result = FormulaPreviewResult(
+                    source_hash=str(key[0]),
+                    payload=None,
+                    error=str(exc),
+                )
+            with self._lock:
+                self._pending.discard(key)
+                if self._closed:
+                    continue
+                self._cache[key] = result
+                self._cache.move_to_end(key)
+                while len(self._cache) > 256:
+                    self._cache.popitem(last=False)
+            self.completed.emit(result)
+
+
+_FORMULA_PREVIEW_SERVICE: FormulaPreviewService | None = None
+
+
+def formula_preview_service() -> FormulaPreviewService:
+    global _FORMULA_PREVIEW_SERVICE
+    if _FORMULA_PREVIEW_SERVICE is None:
+        _FORMULA_PREVIEW_SERVICE = FormulaPreviewService()
+        atexit.register(_FORMULA_PREVIEW_SERVICE.close)
+    return _FORMULA_PREVIEW_SERVICE
+
+
 def formula_rendering_enabled() -> bool:
     """Return whether formula rendering is active.
 
@@ -244,6 +392,117 @@ def render_formula_pixmap(
         logical_height=logical_height,
         device_pixel_ratio=dpr,
         backend="mathtext",
+    )
+
+
+def _render_formula_payload(
+    text: str,
+    *,
+    source_hash: str,
+    color: str,
+    dpi: int,
+    oversample: float,
+    device_pixel_ratio: float,
+    engine: str,
+) -> FormulaRenderPayload:
+    """Perform every potentially blocking renderer operation off the GUI thread."""
+
+    if not formula_rendering_enabled():
+        raise RuntimeError("formula rendering is disabled")
+    latex = normalize_formula_latex(text)
+    if not latex:
+        raise RuntimeError("formula source is empty or unsupported")
+    if engine == "mathjax_svg":
+        try:
+            svg = _render_mathjax_svg(_strip_math_delimiters(latex), color)
+            return FormulaRenderPayload(
+                source_hash=source_hash,
+                normalized_latex=latex,
+                backend="mathjax_svg",
+                kind="svg",
+                data=svg,
+            )
+        except Exception:
+            pass
+    elif engine == "latex_svg":
+        try:
+            svg = _render_latex_svg(latex, _color_to_latex_hex(color))
+            return FormulaRenderPayload(
+                source_hash=source_hash,
+                normalized_latex=latex,
+                backend="latex_svg",
+                kind="svg",
+                data=svg,
+            )
+        except Exception:
+            pass
+    render_dpi = max(
+        72,
+        int(round(float(dpi) * max(1.0, device_pixel_ratio) * max(1.0, oversample))),
+    )
+    rgba = np.ascontiguousarray(_render_mathtext_rgba(latex, color, render_dpi))
+    if rgba.size == 0:
+        raise RuntimeError("mathtext returned an empty image")
+    return FormulaRenderPayload(
+        source_hash=source_hash,
+        normalized_latex=latex,
+        backend="mathtext",
+        kind="rgba",
+        data=rgba.tobytes(),
+        width=int(rgba.shape[1]),
+        height=int(rgba.shape[0]),
+    )
+
+
+def materialize_formula_preview(
+    payload: FormulaRenderPayload,
+    *,
+    target_height: int,
+    device_pixel_ratio: float | None = None,
+) -> FormulaRenderResult:
+    """Create the Qt pixmap on the receiving GUI thread."""
+
+    if not isinstance(payload, FormulaRenderPayload):
+        raise TypeError("formula preview requires FormulaRenderPayload")
+    dpr = _current_device_pixel_ratio() if device_pixel_ratio is None else float(device_pixel_ratio)
+    dpr = min(4.0, max(1.0, dpr))
+    physical_height = max(8, int(round(max(8, int(target_height)) * dpr)))
+    if payload.kind == "svg":
+        pixmap, logical_width, logical_height = _render_svg_pixmap(
+            payload.data,
+            physical_height=physical_height,
+            dpr=dpr,
+        )
+    elif payload.kind == "rgba":
+        if payload.width <= 0 or payload.height <= 0:
+            raise RuntimeError("formula RGBA payload has invalid dimensions")
+        image = QImage(
+            payload.data,
+            payload.width,
+            payload.height,
+            payload.width * 4,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        if image.height() != physical_height:
+            image = image.scaledToHeight(
+                physical_height,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            raise RuntimeError("formula RGBA payload produced an empty pixmap")
+        pixmap.setDevicePixelRatio(dpr)
+        logical_width = max(1, int(round(pixmap.width() / dpr)))
+        logical_height = max(1, int(round(pixmap.height() / dpr)))
+    else:
+        raise RuntimeError(f"unsupported formula preview payload kind: {payload.kind!r}")
+    return FormulaRenderResult(
+        pixmap=pixmap,
+        normalized_latex=payload.normalized_latex,
+        logical_width=logical_width,
+        logical_height=logical_height,
+        device_pixel_ratio=dpr,
+        backend=payload.backend,
     )
 
 

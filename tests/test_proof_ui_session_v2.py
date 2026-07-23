@@ -661,6 +661,111 @@ def test_formula_preview_replaces_source_tag_with_linked_number() -> None:
     )
 
 
+def test_hproof_page_directory_can_collapse_and_restore(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    panel.show()
+    qapp.processEvents()
+
+    panel._toggle_page_directory()
+    assert panel._left_pane.maximumWidth() == 56
+    assert panel._page_directory.isHidden()
+
+    panel._toggle_page_directory()
+    assert panel._left_pane.minimumWidth() == 210
+    assert panel._left_pane.maximumWidth() == 270
+    assert not panel._page_directory.isHidden()
+    panel.close()
+
+
+def test_hproof_discards_formula_result_after_source_changes(
+    qapp,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import app.ui.proof.h_proof as h_proof
+
+    session, _service = _session(tmp_path)
+    panel = h_proof.HProofPanel(build_proof_workspace_view(session))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    stale_hash = h_proof.formula_source_hash("old formula")
+    widget._formula_request_targets[stale_hash].add(34)
+    monkeypatch.setattr(
+        h_proof,
+        "materialize_formula_preview",
+        lambda *_args, **_kwargs: pytest.fail("stale payload was materialized"),
+    )
+
+    widget._on_formula_preview_completed(
+        h_proof.FormulaPreviewResult(source_hash=stale_hash, payload=object())
+    )
+
+    assert stale_hash not in widget._formula_request_targets
+    panel.close()
+
+
+def test_hproof_whole_row_surfaces_activate_and_focus_editor(qapp, tmp_path) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    panel.show()
+    qapp.processEvents()
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    activations: list[bool] = []
+    widget.activated.connect(lambda: activations.append(True))
+
+    for surface in (widget._title, widget._status, widget._active_bar):
+        widget.editor.clearFocus()
+        activations.clear()
+        QTest.mouseClick(surface, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert activations
+        assert widget.editor.hasFocus()
+
+    widget.editor.clearFocus()
+    activations.clear()
+    widget._displayed_pixmap_size.setWidth(1)
+    widget._displayed_pixmap_size.setHeight(1)
+    widget._on_image_clicked(QPoint(widget._image.width() - 1, 0))
+    assert activations
+    assert widget.editor.hasFocus()
+    panel.close()
+
+
+def test_hproof_resolves_image_hit_before_focus_rescales_row(
+    qapp,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    widget = panel._row_widgets[("proof-1", "unit-1")]
+    target = widget.row.entries[1]
+    order: list[str] = []
+
+    def resolve(_point):
+        order.append("resolve")
+        return target
+
+    def activate():
+        order.append("activate")
+        widget._displayed_pixmap_size.setWidth(999)
+
+    monkeypatch.setattr(widget, "_entry_at_image_point", resolve)
+    monkeypatch.setattr(widget, "_activate_from_pointer", activate)
+
+    widget._on_image_clicked(QPoint(1, 1))
+
+    assert order == ["resolve", "activate"]
+    assert widget.editor.textCursor().selectionStart() == target.char_index
+    panel.close()
+
+
 def test_hproof_recreates_editor_when_row_kind_changes(qapp, tmp_path) -> None:
     from app.ui.proof.h_proof import HProofPanel, _FormulaLineSourceEdit
 
@@ -1085,6 +1190,25 @@ def test_vproof_index_edit_uses_stable_entry_ids_and_emits_command(
     assert selected_key[0:2] == ("proof-1", "unit-1")
     assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
     assert session.ocr_observation_repository.get_atom("atom-1").text == "a"
+    panel.close()
+
+
+def test_vproof_adjacent_toggle_preserves_current_occurrence(qapp, tmp_path) -> None:
+    from app.ui.proof.v_proof import VProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = VProofPanel(build_proof_workspace_view(session))
+    panel._gallery.clear()
+    for index in range(3):
+        panel._gallery.addItem(f"item-{index}")
+    panel._gallery.setCurrentRow(1)
+
+    panel._toggle_adjacent_gallery(1)
+
+    assert panel._gallery.currentRow() == 1
+    assert panel._gallery.item(2).isSelected()
+    panel._toggle_adjacent_gallery(1)
+    assert not panel._gallery.item(2).isSelected()
     panel.close()
 
 

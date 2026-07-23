@@ -100,7 +100,7 @@ def test_compiler_uses_layout_identity_and_paddle_content_only() -> None:
 
     assert request.rows[0].block_uid == "block-1"
     assert request.rows[0].content == "Paddle observed text"
-    assert request.rows[0].native_payload()["_layout_block_uid"] == "block-1"
+    assert request.rows[0].ocr_policy is OcrPolicy.TEXT_OCR
     assert request.input_fingerprint
 
 

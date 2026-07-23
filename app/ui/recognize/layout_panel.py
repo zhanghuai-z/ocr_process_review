@@ -755,6 +755,12 @@ class LayoutPanel(QWidget):
         """Display one immutable application workspace projection."""
         if not isinstance(workspace, LayoutWorkspaceView):
             raise TypeError("layout panel requires LayoutWorkspaceView")
+        ordered_pages = tuple(sorted(
+            workspace.pages,
+            key=lambda value: (value.page_number, value.page_uid),
+        ))
+        if tuple(self._pages) == ordered_pages:
+            return
         self._set_page_views(workspace.pages)
         if not self._pages:
             self._update_page_nav()
@@ -836,6 +842,8 @@ class LayoutPanel(QWidget):
     def set_current_page_uid(self, page_uid: str) -> None:
         for idx, page in enumerate(self._pages):
             if page.uid == page_uid:
+                if idx == self._current_page_idx:
+                    return
                 self._page_list.set_current_index(idx)
                 self._current_page_idx = idx
                 self._update_viewer(idx)
@@ -1589,6 +1597,8 @@ class LayoutPanel(QWidget):
                     for line in region.lines
                     for atom in line.atoms
                 )
+        if self._atom_boxes_by_page == boxes:
+            return
         self._atom_boxes_by_page = boxes
         if self._pages:
             self._refresh_current_page_layers()

@@ -26,7 +26,17 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -68,11 +78,19 @@ from app.application.proof_workspace import (
     ProofPageView,
     ProofStateView,
     ProofTextUnitView,
+    ProofWorkspacePatch,
     ProofWorkspaceView,
+    apply_proof_workspace_patch,
 )
 from app.ui.proof import char_verdict as _cv
 from app.ui.proof.confidence_view import ProofCharView, build_char_views, normalize_confidence
-from app.ui.proof.formula_renderer import render_formula_pixmap
+from app.ui.proof.formula_renderer import (
+    FormulaPreviewResult,
+    formula_preview_service,
+    formula_source_hash,
+    materialize_formula_preview,
+    render_formula_pixmap,
+)
 from app.ui.widgets.page_thumbnail import PAGE_ROW_H, PageDirectoryRow
 
 
@@ -127,6 +145,7 @@ NEAR_LINE_PAIR_MAX_H = 58
 FAR_LINE_PAIR_MIN_H = 48
 FAR_LINE_PAIR_MAX_H = 54
 FOCUS_OPACITY = {"active": 1.0, "near": 0.45, "far": 0.30}
+FOCUS_TRANSITION_MS = 120
 
 FORMULA_IMAGE_ROW_H = 96
 FORMULA_RENDER_TARGET_H = 72
@@ -374,6 +393,9 @@ def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual |
             kind="" if _contains_cjk_text(fallback_text) else "formula",
         )
     return None
+
+
+_SYNC_FORMULA_RENDERER = _render_formula_visual
 
 
 def _formula_preview_source(source: str, number_text: str = "") -> str:
@@ -1778,8 +1800,8 @@ class _ProofRowWidget(QFrame):
         self._active_bar.setFixedWidth(4)
         root.addWidget(self._active_bar)
 
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
         header = QHBoxLayout()
@@ -1807,6 +1829,9 @@ class _ProofRowWidget(QFrame):
         self._selected_char_index: int | None = None
         self._hover_char_index: int | None = None
         self._focus_depth = "far"
+        self._focus_initialized = False
+        self._focus_animation: QVariantAnimation | None = None
+        self._visual_opacity = FOCUS_OPACITY["far"]
         self._displayed_pixmap_size = QSize()
         self._image.clicked.connect(self._on_image_clicked)
         self._image.right_clicked.connect(self._open_standalone_formula_editor)
@@ -1846,6 +1871,12 @@ class _ProofRowWidget(QFrame):
         self._formula_source_range: tuple[int, int] | None = None
         self._formula_popup: _FormulaSourcePopup | None = None
         self._formula_source_panel: _FormulaSourceInlinePanel | None = None
+        self._formula_preview_service = formula_preview_service()
+        self._formula_preview_service.completed.connect(self._on_formula_preview_completed)
+        self._formula_request_targets: dict[str, set[int]] = defaultdict(set)
+        self._formula_visual_cache: dict[tuple[str, int], _FormulaVisual | None] = {}
+        self._formula_fallback_cache: dict[tuple[str, int], _FormulaVisual | None] = {}
+        self._standalone_formula_request: tuple[str, int] | None = None
         self._content_layout = content_layout
         self._formula_render_label.right_clicked.connect(
             self._open_standalone_formula_editor
@@ -1887,7 +1918,20 @@ class _ProofRowWidget(QFrame):
         self.editor.selectionChanged.connect(self._refresh_extra_selections)
         self.editor.hover_char_changed.connect(self._on_hover_char_changed)
         content_layout.addWidget(self.editor)
-        root.addWidget(content, 1)
+        root.addWidget(self._content, 1)
+
+        # The visual unit is one proof row. Passive surfaces activate its
+        # editor; image/editor-specific handlers still retain cursor behavior.
+        self._row_activation_surfaces = (
+            self._active_bar,
+            self._content,
+            self._title,
+            self._status,
+            self._formula_render_area.viewport(),
+            self._formula_render_label,
+        )
+        for surface in self._row_activation_surfaces:
+            surface.installEventFilter(self)
 
         self.editor.setPlainText(row.unit.text)
         self.set_status(row.unit.status)
@@ -2060,6 +2104,12 @@ class _ProofRowWidget(QFrame):
     def set_focus_depth(self, depth: str) -> None:
         if depth not in {"active", "near", "far"}:
             raise ValueError(f"unsupported proof row focus depth: {depth!r}")
+        if self._focus_initialized and depth == self._focus_depth:
+            return
+        if self._focus_animation is not None:
+            self._focus_animation.stop()
+            self._focus_animation.deleteLater()
+            self._focus_animation = None
         self._focus_depth = depth
         active = depth == "active"
         self.set_active(active)
@@ -2069,7 +2119,7 @@ class _ProofRowWidget(QFrame):
             self._refresh_formula_render()
         if not active and self._formula_source_panel is not None:
             self._formula_source_panel.hide()
-        self._image.setFixedHeight(
+        target_image_h = (
             TABLE_ROW_IMAGE_H
             if (active and self._large_image)
             else (
@@ -2096,18 +2146,148 @@ class _ProofRowWidget(QFrame):
             min_h, max_h = NEAR_LINE_PAIR_MIN_H, NEAR_LINE_PAIR_MAX_H
         else:
             min_h, max_h = FAR_LINE_PAIR_MIN_H, FAR_LINE_PAIR_MAX_H
-        self.setMinimumHeight(min_h + extra)
-        self.setMaximumHeight(max_h + extra)
+        target_min_h = min_h + extra
+        target_max_h = max_h + extra
+        target_opacity = FOCUS_OPACITY[depth]
         self.setProperty("focusDepth", depth)
         self.style().unpolish(self)
         self.style().polish(self)
-        self._refresh_image()
+        should_animate = (
+            self._focus_initialized
+            and self.isVisible()
+            and bool(self.style().styleHint(QStyle.StyleHint.SH_Widget_Animate, None, self))
+        )
+        self._focus_initialized = True
+        if not should_animate:
+            self._image.setFixedHeight(target_image_h)
+            self.setMinimumHeight(target_min_h)
+            self.setMaximumHeight(target_max_h)
+            self._visual_opacity = target_opacity
+            self._refresh_image()
+            return
+
+        start_image_h = self._image.height()
+        start_min_h = self.minimumHeight()
+        start_max_h = self.maximumHeight()
+        start_opacity = self._visual_opacity
+        animation = QVariantAnimation(self)
+        animation.setDuration(FOCUS_TRANSITION_MS)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def advance(value: object) -> None:
+            progress = float(value)
+            image_h = round(start_image_h + (target_image_h - start_image_h) * progress)
+            row_min_h = round(start_min_h + (target_min_h - start_min_h) * progress)
+            row_max_h = round(start_max_h + (target_max_h - start_max_h) * progress)
+            self._image.setFixedHeight(image_h)
+            self.setMinimumHeight(row_min_h)
+            self.setMaximumHeight(max(row_min_h, row_max_h))
+            self._visual_opacity = start_opacity + (target_opacity - start_opacity) * progress
+            self._refresh_image(update_editor_geometry=False)
+
+        def finish() -> None:
+            if self._focus_animation is not animation:
+                return
+            self._focus_animation = None
+            self._image.setFixedHeight(target_image_h)
+            self.setMinimumHeight(target_min_h)
+            self.setMaximumHeight(target_max_h)
+            self._visual_opacity = target_opacity
+            self._refresh_image()
+            animation.deleteLater()
+
+        animation.valueChanged.connect(advance)
+        animation.finished.connect(finish)
+        self._focus_animation = animation
+        animation.start()
 
     # ── formula visual layer / source editing ─────────────────
 
     def _schedule_formula_render(self) -> None:
         if self.row.kind == "formula":
             self._formula_render_timer.start()
+
+    def _request_formula_visual(self, text: str, target_height: int) -> _FormulaVisual | None:
+        height = max(8, int(target_height))
+        source_hash = formula_source_hash(text)
+        key = (source_hash, height)
+        if key in self._formula_visual_cache:
+            return self._formula_visual_cache[key]
+        if _render_formula_visual is not _SYNC_FORMULA_RENDERER:
+            visual = _render_formula_visual(text, target_height=height)
+            self._formula_visual_cache[key] = visual
+            return visual
+        self._formula_request_targets[source_hash].add(height)
+        fallback = _render_formula_display(text)
+        fallback_visual = (
+            _FormulaVisual(
+                fallback,
+                kind="" if _contains_cjk_text(fallback) else "formula",
+            )
+            if fallback
+            else None
+        )
+        self._formula_fallback_cache[key] = fallback_visual
+        self._formula_preview_service.request(text)
+        return fallback_visual
+
+    def _on_formula_preview_completed(self, result: object) -> None:
+        if not isinstance(result, FormulaPreviewResult):
+            return
+        heights = self._formula_request_targets.pop(result.source_hash, set())
+        if not heights:
+            return
+        if result.source_hash not in self._current_formula_source_hashes():
+            return
+        for height in heights:
+            visual: _FormulaVisual | None = None
+            if result.payload is not None:
+                try:
+                    rendered = materialize_formula_preview(
+                        result.payload,
+                        target_height=height,
+                    )
+                except Exception:
+                    rendered = None
+                if rendered is not None:
+                    visual = _FormulaVisual(
+                        None,
+                        rendered.pixmap,
+                        QSize(rendered.logical_width, rendered.logical_height),
+                        kind="formula",
+                    )
+            key = (result.source_hash, height)
+            self._formula_visual_cache[key] = (
+                visual if visual is not None else self._formula_fallback_cache.get(key)
+            )
+        if (
+            self._standalone_formula_request is not None
+            and self._standalone_formula_request[0] == result.source_hash
+        ):
+            self._refresh_formula_render()
+        self._refresh_atom_visual_overlays()
+
+    def _current_formula_source_hashes(self) -> set[str]:
+        text = self.editor.toPlainText()
+        sources: set[str] = set()
+        if self.row.kind == "formula":
+            source = _formula_preview_source(
+                text,
+                self.row.formula_number_line.proof_text
+                if self.row.formula_number_line is not None
+                else "",
+            )
+            sources.add(formula_source_hash(source))
+        if len(text) == len(self.row.line.proof_text):
+            for placement in self.row.atom_placements:
+                if _atom_kind(placement.atom) != "formula" or not placement.char_indices:
+                    continue
+                start, end = placement.char_indices[0], placement.char_indices[-1] + 1
+                if 0 <= start < end <= len(text):
+                    sources.add(formula_source_hash(text[start:end]))
+        return sources
 
     def _refresh_formula_render(self) -> None:
         """Display-formula rows: middle row shows the rendered formula.
@@ -2123,15 +2303,17 @@ class _ProofRowWidget(QFrame):
             self._formula_render_area.setVisible(False)
             return
         self._formula_render_area.setVisible(self._focus_depth == "active")
-        visual = _render_formula_visual(
-            _formula_preview_source(
-                self.editor.toPlainText(),
-                self.row.formula_number_line.proof_text
-                if self.row.formula_number_line is not None
-                else "",
-            ),
-            target_height=FORMULA_RENDER_TARGET_H,
+        source = _formula_preview_source(
+            self.editor.toPlainText(),
+            self.row.formula_number_line.proof_text
+            if self.row.formula_number_line is not None
+            else "",
         )
+        self._standalone_formula_request = (
+            formula_source_hash(source),
+            FORMULA_RENDER_TARGET_H,
+        )
+        visual = self._request_formula_visual(source, FORMULA_RENDER_TARGET_H)
         if visual is not None and visual.pixmap is not None:
             self._formula_render_label.setPixmap(visual.pixmap)
             self._formula_render_label.setText("")
@@ -2172,13 +2354,11 @@ class _ProofRowWidget(QFrame):
                 ):
                     continue
                 start, end = indices[0], indices[-1] + 1
-                visual = _render_formula_visual(
-                    text[start:end],
-                    target_height=max(
-                        8,
-                        round(max(1, self.editor.height()) * FORMULA_VISUAL_HEIGHT_RATIO),
-                    ),
+                target_height = max(
+                    8,
+                    round(max(1, self.editor.height()) * FORMULA_VISUAL_HEIGHT_RATIO),
                 )
+                visual = self._request_formula_visual(text[start:end], target_height)
                 if visual is None:
                     continue
                 overlays.append(
@@ -2311,7 +2491,7 @@ class _ProofRowWidget(QFrame):
             )
         )
 
-    def _refresh_image(self) -> None:
+    def _refresh_image(self, *, update_editor_geometry: bool = True) -> None:
         if self._line_crop.isNull():
             self._image.setPixmap(QPixmap())
             self._image.setText("无可用行图像")
@@ -2343,7 +2523,7 @@ class _ProofRowWidget(QFrame):
                     None,
                 )
             painter.end()
-        opacity = FOCUS_OPACITY[self._focus_depth]
+        opacity = self._visual_opacity
         if opacity < 1.0:
             faded = QPixmap(source.size())
             faded.fill(Qt.GlobalColor.transparent)
@@ -2352,15 +2532,7 @@ class _ProofRowWidget(QFrame):
             painter.drawPixmap(0, 0, source)
             painter.end()
             source = faded
-        row_image_h = (
-            TABLE_ROW_IMAGE_H
-            if (self._focus_depth == "active" and self._large_image)
-            else (
-                (FORMULA_IMAGE_ROW_H if self.row.kind == "formula" else IMAGE_ROW_H)
-                if self._focus_depth == "active"
-                else (NEAR_IMAGE_ROW_H if self._focus_depth == "near" else FAR_IMAGE_ROW_H)
-            )
-        )
+        row_image_h = max(1, self._image.height())
         # 小裁剪区域最多放大 3 倍，避免个别小行框被拉成模糊大图
         row_image_h = min(row_image_h, max(1, source.height() * 3))
         scaled = source.scaledToHeight(
@@ -2375,7 +2547,8 @@ class _ProofRowWidget(QFrame):
         self._displayed_pixmap_size = scaled.size()
         self._image.setPixmap(scaled)
         self._image.setText("")
-        self._refresh_editor_geometry()
+        if update_editor_geometry:
+            self._refresh_editor_geometry()
 
     # ── editor geometry (letter-spacing contract + slot geometry) ──
 
@@ -2541,26 +2714,41 @@ class _ProofRowWidget(QFrame):
         self._refresh_image()
 
     def _on_image_clicked(self, point: QPoint) -> None:
-        self.activated.emit()
-        if self._line_bbox is None or self._displayed_pixmap_size.isEmpty():
-            self.editor.setFocus()
+        entry = self._entry_at_image_point(point)
+        self._activate_from_pointer()
+        if entry is None:
             return
-        y_offset = max(0, (self._image.height() - self._displayed_pixmap_size.height()) // 2)
+
+        cursor = self.editor.textCursor()
+        cursor.setPosition(min(entry.char_index, len(self.editor.toPlainText())))
+        cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+        self.editor.setTextCursor(cursor)
+        self.editor.setFocus()
+
+    def _entry_at_image_point(self, point: QPoint) -> ProofCharView | None:
+        """Resolve one click using geometry captured before focus changes scale."""
+
+        line_bbox = self._line_bbox
+        displayed_size = QSize(self._displayed_pixmap_size)
+        crop_size = QSize(self._line_crop.size())
+        image_height = self._image.height()
+        if line_bbox is None or displayed_size.isEmpty() or crop_size.isEmpty():
+            return None
+        y_offset = max(0, (image_height - displayed_size.height()) // 2)
         if not (
-            0 <= point.x() < self._displayed_pixmap_size.width()
-            and y_offset <= point.y() < y_offset + self._displayed_pixmap_size.height()
+            0 <= point.x() < displayed_size.width()
+            and y_offset <= point.y() < y_offset + displayed_size.height()
         ):
-            return
-        source_x = point.x() * self._line_crop.width() / self._displayed_pixmap_size.width()
-        source_y = (point.y() - y_offset) * self._line_crop.height() / self._displayed_pixmap_size.height()
-        line_left, line_top, line_right, line_bottom = self._line_bbox
-        page_x = line_left + source_x * (line_right - line_left) / self._line_crop.width()
-        page_y = line_top + source_y * (line_bottom - line_top) / self._line_crop.height()
+            return None
+        source_x = point.x() * crop_size.width() / displayed_size.width()
+        source_y = (point.y() - y_offset) * crop_size.height() / displayed_size.height()
+        line_left, line_top, line_right, line_bottom = line_bbox
+        page_x = line_left + source_x * (line_right - line_left) / crop_size.width()
+        page_y = line_top + source_y * (line_bottom - line_top) / crop_size.height()
         entries = tuple(entry for entry in self.row.entries if entry.bbox is not None)
         if not entries:
-            self.editor.setFocus()
-            return
-        entry = min(
+            return None
+        return min(
             entries,
             key=lambda item: (
                 0
@@ -2571,11 +2759,24 @@ class _ProofRowWidget(QFrame):
                 abs(((item.bbox[0] + item.bbox[2]) / 2) - page_x) if item.bbox else float("inf"),
             ),
         )
-        cursor = self.editor.textCursor()
-        cursor.setPosition(min(entry.char_index, len(self.editor.toPlainText())))
-        cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
-        self.editor.setTextCursor(cursor)
-        self.editor.setFocus()
+
+    def _activate_from_pointer(self) -> None:
+        self.activated.emit()
+        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._activate_from_pointer()
+        super().mousePressEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if (
+            any(watched is surface for surface in self._row_activation_surfaces)
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._activate_from_pointer()
+        return super().eventFilter(watched, event)
 
 
 class HProofPanel(QWidget):
@@ -2621,23 +2822,38 @@ class HProofPanel(QWidget):
         self._splitter.setObjectName("hproofSplitter")
         self._splitter.setChildrenCollapsible(False)
 
-        left = QFrame()
-        left.setObjectName("proofLeftPane")
-        left.setMinimumWidth(210)
-        left.setMaximumWidth(270)
-        left_layout = QVBoxLayout(left)
+        self._left_pane = QFrame()
+        self._left_pane.setObjectName("proofLeftPane")
+        self._left_pane.setMinimumWidth(210)
+        self._left_pane.setMaximumWidth(270)
+        self._directory_expanded_width = 236
+        self._directory_collapsed = False
+        left_layout = QVBoxLayout(self._left_pane)
         left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(8)
-        directory_title = QLabel("页面")
-        directory_title.setObjectName("sectionTitle")
-        left_layout.addWidget(directory_title)
+        directory_header = QHBoxLayout()
+        self._directory_title = QLabel("页面")
+        self._directory_title.setObjectName("sectionTitle")
+        directory_header.addWidget(self._directory_title)
+        directory_header.addStretch(1)
+        self._btn_toggle_directory = QPushButton()
+        self._btn_toggle_directory.setObjectName("ghostBtn")
+        self._btn_toggle_directory.setFixedSize(28, 28)
+        self._btn_toggle_directory.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_toggle_directory.setToolTip("收起页面目录")
+        self._btn_toggle_directory.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)
+        )
+        self._btn_toggle_directory.clicked.connect(self._toggle_page_directory)
+        directory_header.addWidget(self._btn_toggle_directory)
+        left_layout.addLayout(directory_header)
         self._page_directory = QListWidget()
         self._page_directory.setObjectName("pageDirectoryList")
         self._page_directory.setSpacing(10)
         self._page_directory.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self._page_directory.currentItemChanged.connect(self._on_page_directory_selected)
         left_layout.addWidget(self._page_directory, 1)
-        self._splitter.addWidget(left)
+        self._splitter.addWidget(self._left_pane)
 
         center = QWidget()
         center.setObjectName("proofCenterPane")
@@ -2765,6 +2981,34 @@ class HProofPanel(QWidget):
         toolbar.addWidget(self._scope)
         root.addWidget(self._status_bar)
 
+    def _toggle_page_directory(self) -> None:
+        self._directory_collapsed = not self._directory_collapsed
+        if self._directory_collapsed:
+            sizes = self._splitter.sizes()
+            if sizes and sizes[0] > 56:
+                self._directory_expanded_width = sizes[0]
+            self._directory_title.hide()
+            self._page_directory.hide()
+            self._left_pane.setMinimumWidth(56)
+            self._left_pane.setMaximumWidth(56)
+            self._splitter.setSizes([56, max(1, sum(sizes) - 56)])
+            self._btn_toggle_directory.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+            )
+            self._btn_toggle_directory.setToolTip("展开页面目录")
+            return
+        self._left_pane.setMinimumWidth(210)
+        self._left_pane.setMaximumWidth(270)
+        self._directory_title.show()
+        self._page_directory.show()
+        sizes = self._splitter.sizes()
+        width = min(270, max(210, self._directory_expanded_width))
+        self._splitter.setSizes([width, max(1, sum(sizes) - width)])
+        self._btn_toggle_directory.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)
+        )
+        self._btn_toggle_directory.setToolTip("收起页面目录")
+
     # ── workspace intake ───────────────────────────────────────
 
     def set_workspace(self, workspace: ProofWorkspaceView | None) -> None:
@@ -2794,6 +3038,31 @@ class HProofPanel(QWidget):
 
     def clear_workspace(self) -> None:
         self.set_workspace(None)
+
+    def apply_workspace_patch(self, patch: ProofWorkspacePatch) -> None:
+        """Merge committed proof units while retaining page image caches."""
+
+        if self._workspace is None:
+            raise RuntimeError("cannot apply a proof patch without a workspace")
+        previous_rows = {row.key: row for row in self._rows}
+        for key in tuple(self._dirty_text):
+            if key in previous_rows:
+                self._dirty_origin.setdefault(key, previous_rows[key].unit.text)
+        self._workspace = apply_proof_workspace_patch(self._workspace, patch)
+        self._build_rows()
+        self._reconcile_dirty_rows()
+        changed_keys = {
+            (state.proof_uid, unit.text_unit_uid)
+            for state in patch.states
+            for unit in state.text_units
+        }
+        changed_number_keys = set(changed_keys)
+        changed_keys.update(
+            (link.proof_uid, link.formula_text_unit_uid)
+            for link in self._workspace.formula_number_links
+            if (link.proof_uid, link.number_text_unit_uid) in changed_number_keys
+        )
+        self._render_rows(changed_keys=changed_keys)
 
     def _pages(self) -> tuple[ProofPageView, ...]:
         if self._workspace is None:
@@ -3012,7 +3281,11 @@ class HProofPanel(QWidget):
         self._table_empty_label.setVisible(not self._visible_rows)
         self._finish_render_rows()
 
-    def _render_rows(self) -> None:
+    def _render_rows(
+        self,
+        *,
+        changed_keys: set[tuple[str, str]] | None = None,
+    ) -> None:
         kinds = self._debug_kinds()
         self._update_mode_banner(kinds)
         if "table" in kinds:
@@ -3041,7 +3314,12 @@ class HProofPanel(QWidget):
             for row in self._visible_rows:
                 widget = self._row_widgets[row.key]
                 if widget.row != row:
-                    widget.update_row(row)
+                    if changed_keys is not None and row.key not in changed_keys:
+                        # State CAS metadata advances for every unit, while its
+                        # local text/geometry projection remains unchanged.
+                        widget.row = row
+                    else:
+                        widget.update_row(row)
                 if row.key not in self._dirty_text and widget.editor.toPlainText() != row.unit.text:
                     widget.editor.blockSignals(True)
                     widget.editor.setPlainText(row.unit.text)

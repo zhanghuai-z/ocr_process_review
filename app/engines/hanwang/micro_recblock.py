@@ -27,6 +27,7 @@ from app.models.char_geometry import NativeGeometryProposal
 from app.models.charocr_execution import (
     CharOcrAtomObservation,
     CharOcrCandidateObservation,
+    CharOcrInputRow,
     CharOcrLineObservation,
     CharOcrPageRequest,
     CharOcrPageResult,
@@ -69,8 +70,6 @@ logger = get_logger(__name__)
 
 
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
-ROUTE_ROW_LAYOUT_BLOCK_UID_KEY = "_layout_block_uid"
-ROUTE_ROW_OCR_POLICY_KEY = "_layout_ocr_policy"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
@@ -126,6 +125,7 @@ class _NativeLineResult:
 @dataclass
 class _NativeRegionResult:
     block_idx: int
+    block_uid: str
     block_label: str
     block_bbox: tuple[int, int, int, int]
     source: str
@@ -144,6 +144,7 @@ class _NativeRegionResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "block_idx": self.block_idx,
+            "block_uid": self.block_uid,
             "block_label": self.block_label,
             "block_bbox": list(self.block_bbox),
             "layout_bbox": list(self.layout_bbox) if self.layout_bbox else None,
@@ -341,20 +342,6 @@ def _is_unknown_hanwang_label(label: str) -> bool:
     if normalized in TEXT_LABELS or normalized in SKIP_LABELS:
         return False
     return not _is_skip_label(label)
-
-
-def _row_ocr_policy(block: dict[str, Any]) -> str:
-    raw = str(block.get(ROUTE_ROW_OCR_POLICY_KEY) or "").strip()
-    if not raw:
-        raise RuntimeError("CharOCR native input row is missing its explicit OCR policy")
-    try:
-        return OcrPolicy(raw).value
-    except ValueError as exc:
-        raise RuntimeError(f"CharOCR native input row has invalid OCR policy: {raw!r}") from exc
-
-
-def _row_dispatches_to_text_ocr(block: dict[str, Any]) -> bool:
-    return _row_ocr_policy(block) == OcrPolicy.TEXT_OCR.value
 
 
 def _block_text(block: dict[str, Any]) -> str:
@@ -2207,36 +2194,31 @@ def _write_micro_recblock_hook(
 
 
 def _compile_native_route_map(
-    ppvl_blocks: list[dict],
+    input_rows: tuple[CharOcrInputRow, ...],
     routing_plan: PageRoutingPlan,
 ) -> dict[int, tuple[RoutingLine, ...]]:
     """Map immutable page routes to transient native row indexes.
 
-    ``PageRoutingPlan`` is the only production CharOCR dispatch input.  Native
-    rows still carry PP-VL metadata required by Hanwang, but are never mutated
-    with route records or treated as a second routing authority.
+    ``PageRoutingPlan`` is the only production CharOCR dispatch input. Stable
+    identity comes from typed input rows; the transient vendor dictionaries
+    contain only image-region fields consumed by Hanwang.
     """
     if not routing_plan.is_dispatchable:
         raise RuntimeError("Hanwang native runner received a non-dispatchable page routing plan")
-    rows_by_uid: dict[str, tuple[int, dict]] = {}
-    for index, row in enumerate(ppvl_blocks):
-        uid = str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
-        if uid:
-            rows_by_uid[uid] = (index, row)
+    rows_by_uid = {row.block_uid: index for index, row in enumerate(input_rows)}
     routes_by_block_index: dict[int, tuple[RoutingLine, ...]] = {}
     for block_route in routing_plan.blocks:
-        entry = rows_by_uid.get(block_route.block_uid)
-        if entry is None:
+        block_index = rows_by_uid.get(block_route.block_uid)
+        if block_index is None:
             raise RuntimeError(
                 "CharOCR routing plan references a layout block missing from native input: "
                 f"{block_route.block_uid}"
             )
-        block_index, _row = entry
         routes_by_block_index[block_index] = tuple(block_route.plan.lines)
     missing_text_rows = [
         index
-        for index, row in enumerate(ppvl_blocks)
-        if _row_dispatches_to_text_ocr(row)
+        for index, row in enumerate(input_rows)
+        if row.ocr_policy is OcrPolicy.TEXT_OCR
         and index not in routes_by_block_index
     ]
     if missing_text_rows:
@@ -2249,7 +2231,7 @@ def _compile_native_route_map(
 
 def run_micro_recblock(
     image_bgr: np.ndarray,
-    ppvl_blocks: list[dict],
+    input_rows: tuple[CharOcrInputRow, ...],
     *,
     seg_timeout: float = 120.0,
     recog_timeout: float = 60.0,
@@ -2259,8 +2241,21 @@ def run_micro_recblock(
 ) -> tuple[tuple[CharOcrRegionObservation, ...], RunStats]:
     """Run native CharOCR from one explicit page routing plan."""
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
+    if not isinstance(input_rows, tuple) or any(
+        not isinstance(row, CharOcrInputRow) for row in input_rows
+    ):
+        raise TypeError("Hanwang native runner requires typed CharOcrInputRow values")
+    ppvl_blocks = [
+        {
+            "block_label": row.label,
+            "source_label": row.label,
+            "block_bbox": list(row.bbox),
+            "block_content": row.content,
+        }
+        for row in input_rows
+    ]
     height, width = image_bgr.shape[:2]
-    native_routes_by_block_index = _compile_native_route_map(ppvl_blocks, routing_plan)
+    native_routes_by_block_index = _compile_native_route_map(input_rows, routing_plan)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
     skip_indices: list[int] = []
@@ -2268,7 +2263,7 @@ def run_micro_recblock(
         label = _effective_label_for_block(block)
         if _is_unknown_hanwang_label(label):
             stats.n_unknown_paddle_labels += 1
-        if _row_dispatches_to_text_ocr(block):
+        if input_rows[idx].ocr_policy is OcrPolicy.TEXT_OCR:
             text_indices.append(idx)
         else:
             skip_indices.append(idx)
@@ -2334,6 +2329,7 @@ def run_micro_recblock(
         synthesize_chars = not is_formula_label(label)
         rows[idx] = _NativeRegionResult(
             block_idx=idx,
+            block_uid=input_rows[idx].block_uid,
             block_label=label,
             block_bbox=bbox,
             layout_bbox=layout_bbox,
@@ -2942,6 +2938,7 @@ def run_micro_recblock(
             text = hw_text
             rows[block_idx] = _NativeRegionResult(
                 block_idx=block_idx,
+                block_uid=input_rows[block_idx].block_uid,
                 block_label=label,
                 block_bbox=bbox,
                 layout_bbox=layout_bbox,
@@ -2994,6 +2991,7 @@ def run_micro_recblock(
         ppvl_text = _block_text(block)
         rows[block_idx] = _NativeRegionResult(
             block_idx=block_idx,
+            block_uid=input_rows[block_idx].block_uid,
             block_label=label,
             block_bbox=bbox,
             layout_bbox=layout_bbox,
@@ -3085,16 +3083,11 @@ def _native_line_observation(line: _NativeLineResult) -> CharOcrLineObservation:
 def _native_region_observation(
     row: _NativeRegionResult,
 ) -> CharOcrRegionObservation:
-    block_uid = str(row.raw_block.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
-    if not block_uid:
-        raise RuntimeError(
-            "Hanwang native output row is missing the request input row UID"
-        )
     audit = row.raw_block.get(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, {})
     if not isinstance(audit, dict):
         audit = {}
     return CharOcrRegionObservation(
-        block_uid=block_uid,
+        block_uid=row.block_uid,
         label=row.block_label,
         bbox=row.block_bbox,
         source=row.source,
@@ -3180,13 +3173,9 @@ class HanwangMicroRecBlockEngine:
             raise TypeError(
                 "Hanwang native adapter requires CharOcrPageRequest"
             )
-        native_rows = [
-            row.native_payload()
-            for row in request.rows
-        ]
         runner_result = self._runner(
             image_bgr,
-            native_rows,
+            request.rows,
             seg_timeout=self._seg_timeout,
             recog_timeout=self._recog_timeout,
             include_chars=True,

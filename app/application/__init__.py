@@ -22,7 +22,14 @@ from .ocr_workspace import (
     OcrWorkspaceView,
     build_ocr_workspace_view,
 )
-from .proof_workspace import ProofWorkspaceView, build_proof_workspace_view
+from .proof_workspace import (
+    ProofStatePatch,
+    ProofWorkspacePatch,
+    ProofWorkspaceView,
+    apply_proof_workspace_patch,
+    build_proof_workspace_patch,
+    build_proof_workspace_view,
+)
 from .workbench import WorkbenchApplication
 
 __all__ = [
@@ -42,9 +49,13 @@ __all__ = [
     "ProofBatchEditResult",
     "ProofEditCommand",
     "ProofEditResult",
+    "ProofStatePatch",
+    "ProofWorkspacePatch",
     "ProofWorkspaceView",
     "WorkbenchApplication",
     "build_layout_workspace_view",
     "build_ocr_workspace_view",
+    "apply_proof_workspace_patch",
+    "build_proof_workspace_patch",
     "build_proof_workspace_view",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import time
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -208,3 +209,34 @@ def test_mathjax_node_path_finds_bundled_modules(monkeypatch) -> None:
         and path.exists()
         for path in node_paths
     )
+
+
+def test_formula_preview_service_enqueues_slow_render_without_blocking(monkeypatch):
+    from app.ui.proof import formula_renderer
+
+    def slow_payload(text, **kwargs):
+        time.sleep(0.15)
+        return formula_renderer.FormulaRenderPayload(
+            source_hash=kwargs["source_hash"],
+            normalized_latex=text,
+            backend="test",
+            kind="svg",
+            data=_TINY_SVG,
+        )
+
+    monkeypatch.setattr(formula_renderer, "_render_formula_payload", slow_payload)
+    service = formula_renderer.FormulaPreviewService()
+    completed = []
+    service.completed.connect(completed.append)
+    started = time.perf_counter()
+
+    source_hash = service.request(r"x^2")
+
+    assert (time.perf_counter() - started) < 0.05
+    deadline = time.monotonic() + 2.0
+    while not completed and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert completed
+    assert completed[0].source_hash == source_hash
+    service.close()

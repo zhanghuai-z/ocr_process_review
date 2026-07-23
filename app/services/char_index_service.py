@@ -26,6 +26,7 @@ class CharIndexService:
         lines: tuple[OcrLine, ...],
         atoms: tuple[OcrAtom, ...],
         state: ProofState,
+        text_unit_uids: frozenset[str] | None = None,
     ) -> CharIndex:
         if page.uid != batch.scope_uid:
             raise ValueError("page and active OCR batch scope do not match")
@@ -55,8 +56,15 @@ class CharIndexService:
             ),
         )
         unit_offsets = _unit_offsets(state)
+        if text_unit_uids is not None:
+            known_unit_uids = {unit.uid for unit, _offset in unit_offsets}
+            unknown = set(text_unit_uids) - known_unit_uids
+            if unknown:
+                raise ValueError(f"character index filter contains unknown text units: {sorted(unknown)!r}")
         entries: list[CharIndexEntry] = []
         for unit, start in unit_offsets:
+            if text_unit_uids is not None and unit.uid not in text_unit_uids:
+                continue
             for offset, text in enumerate(unit.text):
                 proof_index = start + offset
                 source_index = alignment.source_index_for(proof_index)

@@ -146,6 +146,24 @@ def test_panel_emits_draw_intent_from_workspace_view(tmp_path: Path) -> None:
     assert page_view.block_uids == ("block-1",)
 
 
+def test_panel_skips_identical_workspace_and_current_page_redraw(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _qt_app()
+    page = _page(tmp_path / "page.png")
+    page_view = PageView.from_records(page, _snapshot(_artifact()))
+    workspace = LayoutWorkspaceView("project-1", "Book", (page_view,))
+    panel = LayoutPanel(workspace)
+    redraws: list[int] = []
+    monkeypatch.setattr(panel, "_update_viewer", redraws.append)
+
+    panel.set_workspace(workspace)
+    panel.set_current_page_uid(page.uid)
+
+    assert redraws == []
+
+
 def test_panel_emits_geometry_intent_without_mutating_workspace_view(tmp_path: Path) -> None:
     _qt_app()
     artifact = _artifact()

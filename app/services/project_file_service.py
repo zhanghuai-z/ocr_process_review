@@ -111,6 +111,7 @@ class ProjectFileService:
             image_source = self._resolve_input_path(session, page.image_path)
             image_path = self._copy_asset(
                 image_source,
+                target,
                 stage_assets,
                 Path(asset_dir) / "images" / self._asset_name(page.uid, image_source),
                 page.uid,
@@ -125,6 +126,7 @@ class ProjectFileService:
                 else:
                     cache_path = self._copy_asset(
                         cache_source,
+                        target,
                         stage_assets,
                         Path(asset_dir)
                         / "images"
@@ -138,6 +140,7 @@ class ProjectFileService:
                 thumbnail_source = self._resolve_input_path(session, page.thumbnail_path)
                 thumbnail_path = self._copy_asset(
                     thumbnail_source,
+                    target,
                     stage_assets,
                     Path(asset_dir)
                     / "thumbnails"
@@ -164,6 +167,7 @@ class ProjectFileService:
     @staticmethod
     def _copy_asset(
         source: Path,
+        target: Path,
         stage_assets: Path,
         relative: Path,
         page_uid: str,
@@ -175,7 +179,14 @@ class ProjectFileService:
             )
         destination = stage_assets.parent / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        current_asset = target.parent / relative
+        if source.resolve() == current_asset.resolve():
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+        else:
+            shutil.copy2(source, destination)
         return relative.as_posix()
 
     def _validate_stage(self, stage_db: Path) -> None:

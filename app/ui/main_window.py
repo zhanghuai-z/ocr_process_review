@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
         self._controller.layout_workspace_changed.connect(self._on_layout_workspace_changed)
         self._controller.ocr_workspace_changed.connect(self._on_ocr_workspace_changed)
         self._controller.proof_workspace_changed.connect(self._on_proof_workspace_changed)
+        self._controller.proof_workspace_patched.connect(self._on_proof_workspace_patched)
         self._controller.import_finished.connect(self._on_import_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
         self._controller.layout_progress.connect(self._on_layout_progress)
@@ -343,6 +344,10 @@ class MainWindow(QMainWindow):
         self._hproof_panel.set_workspace(workspace)
         self._vproof_panel.set_workspace(workspace)
 
+    def _on_proof_workspace_patched(self, patch: object) -> None:
+        self._hproof_panel.apply_workspace_patch(patch)
+        self._vproof_panel.apply_workspace_patch(patch)
+
     def _on_import_finished(self, result: ImportCompletionView) -> None:
         self._import_panel.setEnabled(True)
         if not result.page_uids:
@@ -372,7 +377,6 @@ class MainWindow(QMainWindow):
     def _on_layout_finished(self) -> None:
         self._progress.finish()
         self._layout_panel.finish_analysis_progress("版面分析完成")
-        self._load_snapshot_into_panel()
         self._set_status_message("版面分析完成")
         self._controller.request_step(STEP_OCR)
 
@@ -388,7 +392,6 @@ class MainWindow(QMainWindow):
     def _on_ocr_finished(self) -> None:
         self._progress.finish()
         self._ocr_panel.finish_progress("OCR 完成")
-        self._load_snapshot_into_panel()
         self._set_status_message("文字识别完成")
 
     def _on_ocr_cancelled(self) -> None:
@@ -468,7 +471,6 @@ class MainWindow(QMainWindow):
             return
         try:
             self._controller.open_project(path)
-            self._load_snapshot_into_panel() if self._controller.is_fully_analyzed else None
             self._go_to_step(self._controller.get_open_step())
         except Exception as exc:
             self._on_worker_error(str(exc))

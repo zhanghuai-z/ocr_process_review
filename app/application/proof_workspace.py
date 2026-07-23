@@ -5,8 +5,8 @@ state. It never refreshes, rebinds, or otherwise mutates either repository.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 
 from app.core.char_index import CharIndexEntry
 from app.core.ocr_currentness import CurrentOcrObservation, current_ocr_observation
@@ -370,6 +370,49 @@ class ProofWorkspaceView:
     @property
     def atoms(self) -> tuple[ProofAtomView, ...]:
         return tuple(atom for line in self.lines for atom in line.atoms)
+
+
+@dataclass(frozen=True, slots=True)
+class ProofStatePatch:
+    """Fresh projections for the text units changed by one proof edit."""
+
+    proof_uid: str
+    revision: int
+    fingerprint: str
+    rebind_required: bool
+    text_units: tuple[ProofTextUnitView, ...]
+    lines: tuple[ProofLineView, ...]
+
+    def __post_init__(self) -> None:
+        _uid(self.proof_uid, "proof_uid")
+        text_units = tuple(self.text_units)
+        lines = tuple(self.lines)
+        if not text_units:
+            raise ValueError("proof state patch requires at least one changed text unit")
+        if any(item.proof_uid != self.proof_uid for item in (*text_units, *lines)):
+            raise ValueError("proof state patch item belongs to another proof state")
+        unit_uids = {item.text_unit_uid for item in text_units}
+        if unit_uids != {item.text_unit_uid for item in lines}:
+            raise ValueError("proof state patch lines must match changed text units")
+        object.__setattr__(self, "text_units", text_units)
+        object.__setattr__(self, "lines", lines)
+
+
+@dataclass(frozen=True, slots=True)
+class ProofWorkspacePatch:
+    """Incremental proof projection produced from committed repository facts."""
+
+    project_uid: str
+    states: tuple[ProofStatePatch, ...]
+
+    def __post_init__(self) -> None:
+        _uid(self.project_uid, "project_uid")
+        states = tuple(self.states)
+        if not states:
+            raise ValueError("proof workspace patch requires at least one state")
+        if len({item.proof_uid for item in states}) != len(states):
+            raise ValueError("proof workspace patch contains duplicate proof states")
+        object.__setattr__(self, "states", states)
 
 
 def _require_session(session: ProjectSession) -> ProjectSession:
@@ -744,6 +787,162 @@ def _state_view(
     )
 
 
+def _state_patch(
+    session: ProjectSession,
+    state: ProofState,
+    changed_text_unit_uids: frozenset[str],
+    pages_by_uid: dict[str, PageRecord],
+    observation: CurrentOcrObservation,
+) -> ProofStatePatch:
+    scope_uid = state.anchor_snapshot.scope_uid
+    page = pages_by_uid.get(scope_uid)
+    if page is None:
+        raise ValueError(f"proof state {state.uid!r} references an unknown page")
+    if state.project_uid != session.project_uid:
+        raise ValueError(f"proof state {state.uid!r} belongs to another project")
+
+    units_by_uid = {unit.uid: unit for unit in state.text_units}
+    unknown = changed_text_unit_uids - set(units_by_uid)
+    if unknown:
+        raise ValueError(f"proof patch references unknown text units: {sorted(unknown)!r}")
+    changed_units = tuple(
+        unit for unit in state.text_units if unit.uid in changed_text_unit_uids
+    )
+    if not changed_units:
+        raise ValueError("proof patch requires at least one changed text unit")
+
+    ocr = session.ocr_observation_repository
+    pointer = observation.pointer
+    batch = observation.batch
+    if pointer.project_uid != session.project_uid:
+        raise ValueError("active OCR pointer belongs to another project")
+    if batch.scope_uid != scope_uid:
+        raise ValueError("active OCR batch scope does not match proof state")
+
+    regions = _ordered_regions(ocr, batch)
+    lines = _ordered_lines(ocr, batch)
+    atoms = _ordered_atoms(ocr, batch)
+    index = CharIndexService().build(
+        page=page,
+        batch=batch,
+        lines=lines,
+        atoms=atoms,
+        state=state,
+        text_unit_uids=changed_text_unit_uids,
+    )
+    lines_by_uid = {item.uid: item for item in lines}
+    atoms_by_uid = {item.uid: item for item in atoms}
+    regions_by_uid = {item.uid: item for item in regions}
+    return ProofStatePatch(
+        proof_uid=state.uid,
+        revision=state.revision,
+        fingerprint=state.fingerprint,
+        rebind_required=state.rebind_required,
+        text_units=tuple(
+            ProofTextUnitView(
+                proof_uid=state.uid,
+                text_unit_uid=unit.uid,
+                order=unit.order,
+                text=unit.text,
+                status=unit.status,
+                revision=unit.revision,
+                fingerprint=unit.fingerprint,
+            )
+            for unit in changed_units
+        ),
+        lines=tuple(
+            _line_view(
+                state=state,
+                unit=unit,
+                batch=batch,
+                page=page,
+                lines_by_uid=lines_by_uid,
+                atoms_by_uid=atoms_by_uid,
+                regions_by_uid=regions_by_uid,
+                entries=_entries_by_unit(index.entries, unit),
+            )
+            for unit in changed_units
+        ),
+    )
+
+
+def build_proof_workspace_patch(
+    session: ProjectSession,
+    changes: Mapping[str, Iterable[str]],
+) -> ProofWorkspacePatch:
+    """Project only text units named by committed proof edit results."""
+
+    session = _require_session(session)
+    if not isinstance(changes, Mapping) or not changes:
+        raise ValueError("proof workspace patch requires committed changes")
+    pages = tuple(session.page_repository.all())
+    pages_by_uid = {item.uid: item for item in pages}
+    patches: list[ProofStatePatch] = []
+    for proof_uid, text_unit_uids in changes.items():
+        state = session.proof_repository.get_state(_uid(proof_uid, "proof_uid"))
+        changed = frozenset(_uid(item, "text_unit_uid") for item in text_unit_uids)
+        if not changed:
+            raise ValueError("proof workspace patch change set must not be empty")
+        observation = current_ocr_observation(session, state.anchor_snapshot.scope_uid)
+        if observation is None:
+            raise ValueError(f"proof state {proof_uid!r} has no active OCR observation")
+        patches.append(_state_patch(session, state, changed, pages_by_uid, observation))
+    return ProofWorkspacePatch(project_uid=session.project_uid, states=tuple(patches))
+
+
+def apply_proof_workspace_patch(
+    workspace: ProofWorkspaceView,
+    patch: ProofWorkspacePatch,
+) -> ProofWorkspaceView:
+    """Merge an incremental projection without changing authoritative facts."""
+
+    if workspace.project_uid != patch.project_uid:
+        raise ValueError("proof workspace patch belongs to another project")
+    patches_by_uid = {item.proof_uid: item for item in patch.states}
+    unknown = set(patches_by_uid) - set(workspace.proof_state_uids)
+    if unknown:
+        raise ValueError(f"proof workspace patch references unknown states: {sorted(unknown)!r}")
+    states: list[ProofStateView] = []
+    for state in workspace.proof_states:
+        state_patch = patches_by_uid.get(state.proof_uid)
+        if state_patch is None:
+            states.append(state)
+            continue
+        units_by_uid = {item.text_unit_uid: item for item in state_patch.text_units}
+        lines_by_uid = {item.text_unit_uid: item for item in state_patch.lines}
+        text_units = tuple(
+            units_by_uid.get(item.text_unit_uid, item) for item in state.text_units
+        )
+        lines = tuple(
+            lines_by_uid[item.text_unit_uid]
+            if item.text_unit_uid in lines_by_uid
+            else replace(
+                item,
+                state_revision=state_patch.revision,
+                state_fingerprint=state_patch.fingerprint,
+            )
+            for item in state.lines
+        )
+        states.append(replace(
+            state,
+            revision=state_patch.revision,
+            fingerprint=state_patch.fingerprint,
+            rebind_required=state_patch.rebind_required,
+            text_units=text_units,
+            lines=lines,
+        ))
+    state_views = tuple(states)
+    return ProofWorkspaceView(
+        project_uid=workspace.project_uid,
+        pages=workspace.pages,
+        proof_states=state_views,
+        lines=tuple(line for state in state_views for line in state.lines),
+        formula_number_links=tuple(
+            link for state in state_views for link in _formula_number_links(state)
+        ),
+    )
+
+
 def build_proof_workspace_view(
     session: ProjectSession,
     *,
@@ -836,9 +1035,13 @@ __all__ = [
     "ProofLineView",
     "ProofPageView",
     "ProofStateView",
+    "ProofStatePatch",
     "ProofTextUnitView",
     "ProofWorkspaceQuery",
+    "ProofWorkspacePatch",
     "ProofWorkspaceView",
+    "apply_proof_workspace_patch",
+    "build_proof_workspace_patch",
     "build_proof_workspace_view",
     "query_proof_workspace",
 ]

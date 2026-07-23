@@ -13,6 +13,8 @@ from app.application.proof_workspace import (
     ProofStateView,
     ProofTextUnitView,
     ProofWorkspaceView,
+    apply_proof_workspace_patch,
+    build_proof_workspace_patch,
     build_proof_workspace_view,
     query_proof_workspace,
 )
@@ -38,6 +40,7 @@ from app.models.proof_records import (
     ProofTextUnit,
 )
 from app.models.project_session import PageRecord, ProjectSession
+from app.services.proof_session_service import ProofSessionService
 
 
 PROJECT_UID = "proof-application-project"
@@ -580,3 +583,40 @@ def test_line_view_keeps_formula_image_geometry_without_character_index_entries(
     assert view.line_uid == line.uid
     assert view.bbox == line.bbox
     assert tuple(atom.atom_uid for atom in view.atoms) == line.atom_uids
+
+
+def test_incremental_patch_projects_only_committed_text_units(monkeypatch) -> None:
+    from app.services.char_index_service import CharIndexService
+
+    session, state, _batch, _pointer = _session()
+    workspace = build_proof_workspace_view(session)
+    unit = state.text_units[0]
+    result = ProofSessionService(session).replace_text(
+        state.uid,
+        unit.uid,
+        "updated",
+        expected_revision=state.revision,
+        expected_fingerprint=state.fingerprint,
+        expected_unit_revision=unit.revision,
+        expected_unit_fingerprint=unit.fingerprint,
+    )
+    filters: list[frozenset[str] | None] = []
+    original_build = CharIndexService.build
+
+    def record_build(self, **kwargs):
+        filters.append(kwargs.get("text_unit_uids"))
+        return original_build(self, **kwargs)
+
+    monkeypatch.setattr(CharIndexService, "build", record_build)
+
+    patch = build_proof_workspace_patch(
+        session,
+        {state.uid: result.changed_text_unit_uids},
+    )
+    merged = apply_proof_workspace_patch(workspace, patch)
+
+    assert filters == [frozenset({unit.uid})]
+    assert patch.states[0].text_units[0].text == "updated"
+    assert merged.pages == workspace.pages
+    assert merged.lines[0].proof_text == "updated"
+    assert merged.proof_states[0].revision == result.state.revision

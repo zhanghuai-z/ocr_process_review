@@ -206,6 +206,7 @@ class WorkflowController(QObject):
     layout_workspace_changed = Signal(object)
     ocr_workspace_changed = Signal(object)
     proof_workspace_changed = Signal(object)
+    proof_workspace_patched = Signal(object)
     step_enabled_changed = Signal(int)
     step_requested = Signal(int)
     layout_finished = Signal()
@@ -360,8 +361,8 @@ class WorkflowController(QObject):
         self.step_enabled_changed.emit(self._max_step)
         self.session_identity_changed.emit(self.project_uid, self.project_name)
         if self._application.has_project:
-            self.layout_workspace_changed.emit(self._application.layout_workspace())
             self.ocr_workspace_changed.emit(self._application.ocr_workspace())
+            self.layout_workspace_changed.emit(self._application.layout_workspace())
             if self.has_any_ocr_result:
                 self.proof_workspace_changed.emit(self._application.proof_workspace())
             else:
@@ -392,7 +393,13 @@ class WorkflowController(QObject):
         """Commit one proof intent and publish the resulting immutable view."""
 
         result = self._application.apply_proof_edit(command)
-        self.proof_workspace_changed.emit(self._application.proof_workspace())
+        results = result.results if isinstance(result, ProofBatchEditResult) else (result,)
+        changes: dict[str, set[str]] = {}
+        for item in results:
+            if item.changed:
+                changes.setdefault(item.proof_uid, set()).update(item.changed_text_unit_uids)
+        if changes:
+            self.proof_workspace_patched.emit(self._application.proof_workspace_patch(changes))
         self._emit_view_state()
         return result
 

@@ -487,3 +487,58 @@ def test_atomic_rollback_restores_existing_db_and_assets(tmp_path: Path, monkeyp
     assert not (tmp_path / "book.assets" / "images" / "page-2.png").exists()
     assert changed.save_path == str(target.resolve())
     assert not list(tmp_path.glob(".book.save-stage-*"))
+
+
+def test_normal_save_hardlinks_unchanged_bound_assets(tmp_path: Path, monkeypatch):
+    service = ProjectFileService()
+    target = tmp_path / "book.ocrproj"
+    bound = service.bind_project(_session(tmp_path), target)
+    links: list[tuple[Path, Path]] = []
+    copies: list[tuple[Path, Path]] = []
+    real_link = project_file_service_module.os.link
+    real_copy = project_file_service_module.shutil.copy2
+
+    def record_link(source, destination):
+        links.append((Path(source), Path(destination)))
+        return real_link(source, destination)
+
+    def record_copy(source, destination):
+        copies.append((Path(source), Path(destination)))
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(project_file_service_module.os, "link", record_link)
+    monkeypatch.setattr(project_file_service_module.shutil, "copy2", record_copy)
+
+    saved = service.save_project(bound)
+
+    assert saved.session.save_path == str(target.resolve())
+    assert len(links) == 2
+    assert copies == []
+
+
+def test_normal_save_falls_back_to_copy_when_hardlink_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    service = ProjectFileService()
+    target = tmp_path / "book.ocrproj"
+    bound = service.bind_project(_session(tmp_path), target)
+    copies: list[tuple[Path, Path]] = []
+    real_copy = project_file_service_module.shutil.copy2
+
+    monkeypatch.setattr(
+        project_file_service_module.os,
+        "link",
+        lambda _source, _destination: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+
+    def record_copy(source, destination):
+        copies.append((Path(source), Path(destination)))
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(project_file_service_module.shutil, "copy2", record_copy)
+
+    service.save_project(bound)
+
+    assert len(copies) == 2
+    assert (tmp_path / "book.assets" / "images" / "page-1.png").is_file()
