@@ -311,7 +311,7 @@ def _refresh_block_observation(
     crop = image_bgr[bbox.y1:bbox.y2, bbox.x1:bbox.x2].copy()
     response: dict[str, Any] | None = None
     regions: tuple[BlockVlTextRegion, ...] | None = None
-    last_error: Exception | None = None
+    errors: list[Exception] = []
     attempts = 0
     for attempt in range(2):
         attempts = attempt + 1
@@ -319,7 +319,7 @@ def _refresh_block_observation(
             response = client.analyze_image(
                 crop,
                 optional_payload=build_paddle_v16_optional_payload(),
-                batch_id=f"{batch_id}-{attempt + 1}",
+                batch_id=f"{batch_id}-1" if attempt == 0 else "",
             )
             regions = _validated_text_regions_from_crop_response(
                 response,
@@ -329,11 +329,18 @@ def _refresh_block_observation(
             )
             break
         except Exception as exc:
-            last_error = exc
+            errors.append(exc)
     if response is None or regions is None:
+        details = "; ".join(
+            f"attempt {index}: {type(error).__name__}: {error}"
+            for index, error in enumerate(errors, start=1)
+        ) or "no response"
         raise BlockVlObservationRefreshError(
-            f"VL1.6 block observation failed after retry: block={block.uid}: {last_error}"
-        ) from last_error
+            "VL1.6 block observation failed after retry: "
+            f"page={page.source_path!r} block={block.uid} "
+            f"label={block.source_label!r} bbox={bbox.to_xyxy()} "
+            f"authorship={block.authorship.value}: {details}"
+        ) from (errors[-1] if errors else None)
 
     job = response.get("paddle_v16", {}) if isinstance(response, dict) else {}
     raw_response_ref = str(job.get("jobId") or "") if isinstance(job, dict) else ""

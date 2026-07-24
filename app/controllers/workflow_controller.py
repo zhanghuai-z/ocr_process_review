@@ -22,6 +22,7 @@ from app.application import (
     WorkbenchApplication,
 )
 from app.core.app_config import get_config
+from app.core.logging import get_logger
 from app.core.workflow_state import (
     STEP_HPROOF,
     STEP_IMPORT,
@@ -49,6 +50,9 @@ from app.services import (
     OcrPageJobResult,
     ProjectFileService,
 )
+
+
+logger = get_logger(__name__)
 
 
 class _TaskCancelled(RuntimeError):
@@ -289,6 +293,12 @@ class _OcrServiceWorker(QThread):
                             raise
                         except Exception as exc:
                             message = str(exc).strip() or type(exc).__name__
+                            logger.exception(
+                                "OCR page failed page_uid=%s source_path=%s: %s",
+                                request.page.uid,
+                                getattr(request.page, "source_path", ""),
+                                message,
+                            )
                             self.page_failed.emit(OcrPageJobFailure(request, message))
                         else:
                             if not isinstance(result, OcrPageJobResult):

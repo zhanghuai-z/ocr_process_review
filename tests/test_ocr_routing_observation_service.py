@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 import app.services.ocr_routing_observation_service as module
 from app.models.enums import BlockSource, BlockType, OcrPolicy
@@ -93,6 +94,36 @@ def _inputs(parent_text: str):
     return page, artifact, snapshot
 
 
+def _edited_text_inputs():
+    page, artifact, _snapshot = _inputs("")
+    original_bbox = BBox.from_xyxy(1, 2, 90, 30)
+    block = LayoutBlockSnapshot(
+        uid="text-1",
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(2, 2, 90, 30),
+        order=0,
+        source_label="text",
+        origin=BlockOrigin(
+            created_by=BlockSource.AUTO_LAYOUT.value,
+            raw_artifact_uid=artifact.uid,
+            raw_index=0,
+            original_bbox=original_bbox,
+            original_kind=BlockType.TEXT,
+        ),
+        ocr_policy=OcrPolicy.TEXT_OCR,
+        authorship=BlockSource.USER_EDITED,
+    )
+    snapshot = LayoutSnapshot(
+        page_uid=page.uid,
+        revision=2,
+        artifact_uid=artifact.uid,
+        source_engine="layout_edit",
+        source_run_id="layout-edit:2",
+        blocks=(block,),
+    )
+    return page, artifact, snapshot
+
+
 def test_exact_parent_formula_text_does_not_call_crop_ocr(monkeypatch) -> None:
     page, artifact, snapshot = _inputs("left $x$ right")
 
@@ -170,3 +201,62 @@ def test_failed_formula_crop_is_an_explicit_nonblocking_observation(monkeypatch)
     assert observation.status is InlineFormulaTextObservationStatus.UNRESOLVED
     assert observation.text == ""
     assert observation.error == "service unavailable"
+
+
+def test_block_vl_refresh_retries_without_optional_batch_id() -> None:
+    page, artifact, snapshot = _edited_text_inputs()
+
+    class Client:
+        def __init__(self) -> None:
+            self.batch_ids: list[str] = []
+
+        def analyze_image(self, _crop, *, optional_payload, batch_id):
+            self.batch_ids.append(batch_id)
+            if batch_id:
+                raise RuntimeError("vendor rejected batch metadata")
+            response = _response("fresh text")
+            response["paddle_v16"] = {"jobId": "job-refresh"}
+            return response
+
+    client = Client()
+    bundle = module.acquire_routing_observation_bundle(
+        page=page,
+        snapshot=snapshot,
+        artifact=artifact,
+        image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+        prepass=object(),
+        vl_client=client,
+    )
+
+    assert len(client.batch_ids) == 2
+    assert client.batch_ids[0]
+    assert client.batch_ids[1] == ""
+    assert bundle.block_vl_observations[0].source_run_id == "job-refresh"
+    assert bundle.block_vl_observations[0].attempts == 2
+
+
+def test_block_vl_refresh_failure_contains_copyable_page_block_and_attempt_details() -> None:
+    page, artifact, snapshot = _edited_text_inputs()
+
+    class Client:
+        def analyze_image(self, _crop, *, optional_payload, batch_id):
+            mode = "batched" if batch_id else "unbatched"
+            raise RuntimeError(f"{mode} request failed")
+
+    with pytest.raises(module.BlockVlObservationRefreshError) as captured:
+        module.acquire_routing_observation_bundle(
+            page=page,
+            snapshot=snapshot,
+            artifact=artifact,
+            image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+            prepass=object(),
+            vl_client=Client(),
+        )
+
+    message = str(captured.value)
+    assert "page='book.pdf'" in message
+    assert "block=text-1" in message
+    assert "label='text'" in message
+    assert "bbox=(2, 2, 90, 30)" in message
+    assert "attempt 1: RuntimeError: batched request failed" in message
+    assert "attempt 2: RuntimeError: unbatched request failed" in message
