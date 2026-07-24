@@ -150,6 +150,10 @@ def _draw_bbox(
 def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     quality = record["production_word_quality"]
     status = str(record.get("word_box_status") or "FINAL")
+    word_box_color = tuple(
+        int(item) for item in record.get("word_box_color", (0, 170, 0))
+    )
+    word_box_color_name = str(record.get("word_box_color_name") or "GREEN")
     image = _read_image(record["source_image"])
     boxes = [
         [int(item) for item in record["route_bbox"]],
@@ -180,7 +184,7 @@ def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
         if atom.get("bbox") is None:
             continue
         if atom.get("granularity") == "word":
-            _draw_bbox(final, atom["bbox"], crop_bbox, (0, 170, 0), 3)
+            _draw_bbox(final, atom["bbox"], crop_bbox, word_box_color, 3)
         else:
             _draw_bbox(final, atom["bbox"], crop_bbox, (0, 140, 255), 2)
 
@@ -189,7 +193,7 @@ def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     for label, panel in (
         ("RAW CONTEXT", raw),
         ("NATIVE: RED CHAR / BLUE PP", native),
-        (f"{status}: GREEN WORD / ORANGE OTHER / BLUE PP", final),
+        (f"{status}: {word_box_color_name} WORD / ORANGE OTHER / BLUE PP", final),
     ):
         panel = cv2.resize(
             panel, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST
@@ -215,9 +219,14 @@ def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     body = np.hstack(normalized)
     header = np.full((70, body.shape[1], 3), 255, np.uint8)
     word = quality["word_atom"]
+    native_suffix = (
+        f" | native={record['native_text']}"
+        if record.get("native_text") is not None
+        else ""
+    )
     cv2.putText(
         header,
-        f"{record['source_name']} | PP={record['text']} | {status} WORD={word['text']} | source={word['source']}",
+        f"{record['source_name']} | PP={record['text']} | {status} WORD={word['text']}{native_suffix} | source={word['source']}",
         (6, 23),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.43,
