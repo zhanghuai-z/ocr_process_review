@@ -181,6 +181,17 @@ def partition_charocr_text_region(
                 bbox=_clip(token.bbox, region_bbox),
             ))
             continue
+        token_bbox = _clip(token.bbox, region_bbox)
+        if _intersect(mask_bbox, token_bbox) is None:
+            diagnostics.append(RoutePartitionDiagnostic(
+                code="disjoint_latin_token_ink",
+                message=(
+                    "PP-OCRv6 Latin/digit token owns no ink inside its observed "
+                    f"bbox; remaining foreground stays on the LineCut route: {token.text!r}"
+                ),
+                bbox=token_bbox,
+            ))
+            continue
         masks.append((token, mask_bbox))
 
     routed = _segments_from_latin_masks(

@@ -566,6 +566,32 @@ def test_narrow_digit_wordbox_owns_its_nearest_complete_component():
     assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 58, 30), "4")]
 
 
+def test_digit_wordbox_does_not_adopt_adjacent_punctuation_ink_at_shared_edge():
+    image = _image()
+    _ink(image, (10, 8, 30, 32))
+    _ink(image, (44, 10, 55, 30))
+    _ink(image, (64, 8, 84, 32))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="式(1)",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "式", (8, 6, 32, 34)),
+            PpOcrV6WordBox(0, 1, "(", (34, 6, 43, 34)),
+            PpOcrV6WordBox(0, 2, "1", (55, 6, 62, 34)),
+            PpOcrV6WordBox(0, 3, ")", (62, 6, 86, 34)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox) for segment in result.segments] == [
+        ("text_other", (0, 0, 100, 40)),
+    ]
+    assert [item.code for item in result.diagnostics] == ["disjoint_latin_token_ink"]
+
+
 def test_latin_leading_glyph_follows_material_overlap_not_neighbor_token_center():
     image = _image()
     _ink(image, (8, 8, 30, 32))        # preceding CJK token
