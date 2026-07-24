@@ -10,6 +10,7 @@ import pytest
 from app.engines.hanwang.micro_recblock import (
     HanwangMicroRecBlockEngine,
     RunStats,
+    run_micro_recblock,
 )
 from app.models.charocr_execution import (
     CharOcrAtomObservation,
@@ -223,6 +224,37 @@ def test_hanwang_engine_uses_only_native_request_rows_and_returns_observations()
     assert result.regions[1].lines[0].atoms == ()
     assert result.page_uid == request.page.uid
     assert result.input_fingerprint == request.input_fingerprint
+
+
+def test_preserved_table_keeps_html_as_one_line_without_synthetic_atoms() -> None:
+    regions, _stats = run_micro_recblock(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        (
+            CharOcrInputRow(
+                block_uid="row-table",
+                label="table",
+                bbox=(5, 5, 115, 70),
+                content="<table><tr><td>1</td></tr></table>",
+                ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
+                authorship=BlockSource.AUTO_LAYOUT,
+                order=0,
+            ),
+        ),
+        routing_plan=PageRoutingPlan(
+            page_uid="page-1",
+            routing_run_uid="routing-run-table",
+            layout_fingerprint="layout-fingerprint-table",
+            prepass_run_id="prepass-run-table",
+            blocks=(),
+        ),
+    )
+
+    assert len(regions) == 1
+    assert regions[0].block_uid == "row-table"
+    assert len(regions[0].lines) == 1
+    assert regions[0].lines[0].text == "<table><tr><td>1</td></tr></table>"
+    assert regions[0].lines[0].bbox == (5, 5, 115, 70)
+    assert regions[0].lines[0].atoms == ()
 
 
 def test_native_text_only_candidate_defaults_to_zero_confidence() -> None:

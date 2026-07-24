@@ -2674,7 +2674,7 @@ def run_micro_recblock(
         layout_bbox = _layout_block_bbox(block, width, height)
         block_bbox_source = "layout_block_bbox"
         ppvl_text = _block_text(block)
-        synthesize_chars = not is_formula_label(label)
+        synthesize_chars = not (is_formula_label(label) or is_table_label(label))
         rows[idx] = _NativeRegionResult(
             block_idx=idx,
             block_uid=input_rows[idx].block_uid,
