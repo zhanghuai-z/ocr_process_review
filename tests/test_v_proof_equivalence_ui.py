@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QEvent, QSize
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
 from app.application.proof_workspace import (
@@ -19,7 +19,7 @@ from app.application.proof_workspace import (
 )
 from app.application.contracts import ProofEditCommand
 from app.ui.proof.confidence_view import ProofCharView
-from app.ui.proof.v_proof import _proofable_entries
+from app.ui.proof.v_proof import VProofPanel, _proofable_entries
 
 
 @pytest.fixture(scope="module")
@@ -54,6 +54,19 @@ def test_vertical_index_excludes_whitespace_occurrences() -> None:
         entry("\t", 2),
         entry("A", 3),
     ])) == ("甲", "A")
+
+
+def test_edit_bubble_hides_on_focus_out(qapp: QApplication, tmp_path: Path) -> None:
+    panel = VProofPanel(_workspace(tmp_path))
+    panel._edit_bubble.show()
+
+    panel.eventFilter(
+        panel._edit_bubble_input,
+        QEvent(QEvent.Type.FocusOut),
+    )
+    qapp.processEvents()
+
+    assert panel._edit_bubble.isHidden()
 
 
 def _workspace(tmp_path: Path) -> ProofWorkspaceView:

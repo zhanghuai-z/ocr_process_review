@@ -401,6 +401,14 @@ class WorkbenchApplication:
                 block_type=command.block_type,
                 source_label=command.source_label,
             )
+        if op == "change_types":
+            return DomainLayoutEditCommand.change_kinds(
+                command.page_uid,
+                command.expected_revision,
+                command.block_uids,
+                block_type=command.block_type,
+                source_label=command.source_label,
+            )
         return DomainLayoutEditCommand.merge_blocks(
             command.page_uid,
             command.expected_revision,

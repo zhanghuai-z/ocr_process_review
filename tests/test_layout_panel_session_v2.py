@@ -189,6 +189,64 @@ def test_panel_emits_geometry_intent_without_mutating_workspace_view(tmp_path: P
     assert page_view.blocks[0].bbox == snapshot.blocks[0].bbox
 
 
+def test_workspace_refresh_preserves_zoom_page_and_multi_selection(tmp_path: Path) -> None:
+    _qt_app()
+    artifact = _artifact()
+    base = _snapshot(artifact)
+    second = replace(
+        base.blocks[0],
+        uid="block-2",
+        bbox=BBox.from_xyxy(0, 55, 120, 95),
+        order=1,
+    )
+    snapshot = replace(base, blocks=(base.blocks[0], second))
+    page = _page(tmp_path / "page.png")
+    page_view = PageView.from_records(page, snapshot)
+    panel = LayoutPanel(LayoutWorkspaceView("project-1", "Book", (page_view,)))
+    panel._viewer.scale(1.7, 1.7)
+    panel._viewer.select_block_uids(("block-1", "block-2"))
+    transform = panel._viewer.transform()
+
+    changed_snapshot = replace(
+        snapshot,
+        revision=2,
+        blocks=(replace(snapshot.blocks[0], source_label="paragraph_title"), second),
+    )
+    changed_page = PageView.from_records(page, changed_snapshot)
+    panel.set_workspace(LayoutWorkspaceView("project-1", "Book", (changed_page,)))
+
+    assert panel._current_page_idx == 0
+    assert panel._viewer.transform() == transform
+    assert tuple(panel._viewer.selected_block_uids()) == ("block-1", "block-2")
+    assert panel._selected_block_uids == ("block-1", "block-2")
+
+
+def test_multi_selection_emits_one_atomic_type_change(tmp_path: Path) -> None:
+    _qt_app()
+    artifact = _artifact()
+    base = _snapshot(artifact)
+    second = replace(
+        base.blocks[0],
+        uid="block-2",
+        bbox=BBox.from_xyxy(0, 55, 120, 95),
+        order=1,
+    )
+    snapshot = replace(base, blocks=(base.blocks[0], second))
+    page_view = PageView.from_records(_page(tmp_path / "page.png"), snapshot)
+    panel = LayoutPanel(LayoutWorkspaceView("project-1", "Book", (page_view,)))
+    requested: list[LayoutEditCommand] = []
+    panel.layout_edit_requested.connect(requested.append)
+    panel._viewer.select_block_uids(("block-1", "block-2"))
+
+    panel._on_selected_type_button_clicked(BlockType.TITLE)
+
+    assert len(requested) == 1
+    assert requested[0].op == "change_types"
+    assert requested[0].block_uids == ("block-1", "block-2")
+    assert requested[0].block_type is BlockType.TITLE
+    assert requested[0].expected_revision == snapshot.revision
+
+
 def test_panel_emits_all_layout_edit_intents_as_application_commands(tmp_path: Path) -> None:
     _qt_app()
     artifact = _artifact()

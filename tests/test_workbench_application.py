@@ -91,6 +91,23 @@ def test_workbench_is_the_layout_write_boundary() -> None:
     assert workbench.is_dirty is True
 
 
+def test_workbench_adapts_atomic_multi_block_type_change() -> None:
+    command = LayoutEditCommand.change_types(
+        "page-1",
+        3,
+        ("block-1", "block-2"),
+        BlockType.TITLE,
+        "paragraph_title",
+    )
+
+    domain = WorkbenchApplication._domain_layout_command(command)
+
+    assert domain.op == "change_kinds"
+    assert domain.block_uids == ("block-1", "block-2")
+    assert domain.block_type is BlockType.TITLE
+    assert domain.source_label == "paragraph_title"
+
+
 def test_workbench_queries_return_detached_immutable_values() -> None:
     workbench = _workbench()
 

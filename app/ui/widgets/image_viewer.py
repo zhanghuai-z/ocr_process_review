@@ -479,6 +479,7 @@ class ImageViewer(QGraphicsView):
     block_geometry_change_requested = Signal(str, object)  # block_uid, BBox
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted_uid = Signal(str)
+    block_selection_changed = Signal(object)  # tuple of selected block UIDs
     atom_geometry_change_requested = Signal(str, object)  # atom_uid, BBox
 
     def __init__(self, parent=None):
@@ -680,6 +681,8 @@ class ImageViewer(QGraphicsView):
         for _item, block in to_remove:
             if block.uid:
                 self.block_deleted_uid.emit(block.uid)
+        if to_remove:
+            self.block_selection_changed.emit(tuple(self.selected_block_uids()))
 
     def selected_block_uids(self) -> List[str]:
         return [
@@ -698,6 +701,17 @@ class ImageViewer(QGraphicsView):
             should_select = bool(target_uid) and block.uid == target_uid
             item.setSelected(should_select)
             selected = selected or should_select
+        self.block_selection_changed.emit(tuple(self.selected_block_uids()))
+        return selected
+
+    def select_block_uids(self, target_uids: Iterable[str]) -> tuple[str, ...]:
+        """Restore a multi-selection after immutable overlay replacement."""
+
+        targets = set(target_uids)
+        for item, block in self._block_items:
+            item.setSelected(block.uid in targets)
+        selected = tuple(self.selected_block_uids())
+        self.block_selection_changed.emit(selected)
         return selected
 
     def highlight_bbox(
@@ -754,6 +768,9 @@ class ImageViewer(QGraphicsView):
     def fit_to_window(self) -> None:
         if self._pixmap_item:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def has_image(self) -> bool:
+        return self._pixmap_item is not None
 
     def set_edit_mode(self, on: bool) -> None:
         """设置 BBox 编辑权限；Space 平移期间会临时关闭。"""
@@ -830,6 +847,7 @@ class ImageViewer(QGraphicsView):
                     if block.uid:
                         self.block_clicked_uid.emit(block.uid)
                     break
+            self.block_selection_changed.emit(tuple(self.selected_block_uids()))
 
     def mouseMoveEvent(self, event):
         if self._draw_start is not None and self._draw_item is not None:
@@ -919,6 +937,7 @@ class ImageViewer(QGraphicsView):
                 selected_uids.append(block.uid)
         if len(selected_uids) == 1:
             self.block_clicked_uid.emit(selected_uids[0])
+        self.block_selection_changed.emit(tuple(selected_uids))
 
     @staticmethod
     def _selection_rect_hits_frame(selection: QRectF, item: BBoxItem) -> bool:

@@ -166,6 +166,30 @@ def test_change_kind_and_resize_preserve_uid_and_return_new_values():
     assert resized.ocr_invalidation.reason == "layout_block_resized"
 
 
+def test_change_kinds_updates_selected_blocks_in_one_revision() -> None:
+    current = _snapshot()
+
+    result = LayoutEditService().apply(
+        current,
+        LayoutEditCommand.change_kinds(
+            current.page_uid,
+            current.revision,
+            ("block-primary", "block-secondary"),
+            block_type=BlockType.TITLE,
+            source_label="paragraph_title",
+        ),
+    )
+
+    changed = result.snapshot.blocks[:2]
+    assert result.snapshot.revision == current.revision + 1
+    assert result.affected_block_uids == ("block-primary", "block-secondary")
+    assert all(block.block_type is BlockType.TITLE for block in changed)
+    assert all(block.source_label == "paragraph_title" for block in changed)
+    assert all(block.authorship is BlockSource.USER_EDITED for block in changed)
+    assert result.snapshot.blocks[2] == current.blocks[2]
+    assert result.ocr_invalidation.reason == "layout_block_kinds_changed"
+
+
 def test_merge_preserves_explicit_primary_uid_removes_secondaries_and_normalizes():
     current = _snapshot()
     command = LayoutEditCommand.merge_blocks(

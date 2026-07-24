@@ -168,6 +168,25 @@ class LayoutEditCommand:
         )
 
     @classmethod
+    def change_kinds(
+        cls,
+        page_uid: str,
+        expected_revision: int,
+        block_uids: Iterable[str],
+        *,
+        block_type: BlockType,
+        source_label: str,
+    ) -> "LayoutEditCommand":
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="change_kinds",
+            block_uids=tuple(block_uids),
+            block_type=block_type,
+            source_label=source_label,
+        )
+
+    @classmethod
     def resize_block(
         cls,
         page_uid: str,
@@ -293,6 +312,8 @@ class LayoutEditService:
             return self._delete_block(current, command)
         if command.op == "change_kind":
             return self._change_kind(current, command)
+        if command.op == "change_kinds":
+            return self._change_kinds(current, command)
         if command.op == "resize_block":
             return self._resize_block(current, command)
         if command.op == "merge_blocks":
@@ -386,6 +407,38 @@ class LayoutEditService:
             before={"block": self.snapshot_block_state(before_block)},
             after={"block": self.snapshot_block_state(after_block)},
             reason="layout_block_kind_changed",
+        )
+
+    def _change_kinds(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        block_uids = self._require_block_uids(command, "change_kinds")
+        block_type = self._require_block_type(command)
+        before_blocks = tuple(self._block_by_uid(current.blocks, uid) for uid in block_uids)
+        selected = set(block_uids)
+        next_blocks = self._normalize_blocks(
+            _copy_block(
+                candidate,
+                block_type=block_type,
+                source_label=command.source_label,
+                ocr_policy=self._default_ocr_policy(block_type),
+                authorship=BlockSource.USER_EDITED,
+            )
+            if candidate.uid in selected
+            else candidate
+            for candidate in current.blocks
+        )
+        after_blocks = tuple(self._block_by_uid(next_blocks, uid) for uid in block_uids)
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=block_uids,
+            before={"blocks": [self.snapshot_block_state(block) for block in before_blocks]},
+            after={"blocks": [self.snapshot_block_state(block) for block in after_blocks]},
+            reason="layout_block_kinds_changed",
         )
 
     def _resize_block(
@@ -552,6 +605,16 @@ class LayoutEditService:
             raise ValueError("merge_blocks requires non-empty block uids")
         if len(set(command.block_uids)) != len(command.block_uids):
             raise ValueError("merge_blocks does not accept duplicate block uids")
+        return command.block_uids
+
+    @staticmethod
+    def _require_block_uids(command: LayoutEditCommand, operation: str) -> tuple[str, ...]:
+        if not command.block_uids:
+            raise ValueError(f"{operation} requires at least one block uid")
+        if any(not uid for uid in command.block_uids):
+            raise ValueError(f"{operation} requires non-empty block uids")
+        if len(set(command.block_uids)) != len(command.block_uids):
+            raise ValueError(f"{operation} does not accept duplicate block uids")
         return command.block_uids
 
     @staticmethod

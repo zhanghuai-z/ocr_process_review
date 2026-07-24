@@ -256,6 +256,7 @@ class _PageViewDirectory(QListWidget):
         if any(not isinstance(page, PageView) for page in values):
             raise TypeError("layout page directory requires PageView values")
         self._suppress_signal = True
+        previous = self.blockSignals(True)
         try:
             self.clear()
             self._page_uids = tuple(page.page_uid for page in values)
@@ -272,6 +273,7 @@ class _PageViewDirectory(QListWidget):
                 )
                 self.setItemWidget(item, row)
         finally:
+            self.blockSignals(previous)
             self._suppress_signal = False
 
     def set_current_index(self, index: int) -> None:
@@ -280,9 +282,11 @@ class _PageViewDirectory(QListWidget):
         if index < 0 or index >= len(self._page_uids):
             raise IndexError(f"directory index is out of range: {index}")
         self._suppress_signal = True
+        previous = self.blockSignals(True)
         try:
             self.setCurrentRow(index)
         finally:
+            self.blockSignals(previous)
             self._suppress_signal = False
 
     def _on_row_changed(self, index: int) -> None:
@@ -312,6 +316,7 @@ class LayoutPanel(QWidget):
         self._pages: list[PageView] = []
         self._current_page_idx: int = 0
         self._selected_block_uid: str | None = None
+        self._selected_block_uids: tuple[str, ...] = ()
         self._atom_boxes_by_page: dict[str, tuple[OcrAtomBox, ...]] = {}
         self._page_gate_states: dict[str, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[str, tuple[str, str, bool]] = {}
@@ -464,6 +469,7 @@ class LayoutPanel(QWidget):
         self._viewer.block_geometry_change_requested.connect(self._on_block_geometry_change_requested)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted_uid.connect(self._on_block_deleted_uid)
+        self._viewer.block_selection_changed.connect(self._on_block_selection_changed)
         self._viewer.atom_geometry_change_requested.connect(
             self._on_atom_geometry_change_requested
         )
@@ -761,11 +767,39 @@ class LayoutPanel(QWidget):
         ))
         if tuple(self._pages) == ordered_pages:
             return
+        previous_page = (
+            self._pages[self._current_page_idx]
+            if 0 <= self._current_page_idx < len(self._pages)
+            else None
+        )
+        previous_page_uid = previous_page.page_uid if previous_page is not None else ""
+        selected_uids = self._selected_block_uids
         self._set_page_views(workspace.pages)
         if not self._pages:
             self._update_page_nav()
             return
-        self._update_viewer(min(self._current_page_idx, len(self._pages) - 1))
+        page_idx = next(
+            (index for index, page in enumerate(self._pages) if page.page_uid == previous_page_uid),
+            min(self._current_page_idx, len(self._pages) - 1),
+        )
+        self._current_page_idx = page_idx
+        self._page_list.set_current_index(page_idx)
+        page = self._pages[page_idx]
+        same_image = (
+            previous_page is not None
+            and previous_page.page_uid == page.page_uid
+            and previous_page.image_path == page.image_path
+            and previous_page.image_revision == page.image_revision
+            and previous_page.image_hash == page.image_hash
+            and self._viewer.has_image()
+        )
+        if same_image:
+            self._show_page_layers(page)
+        else:
+            self._update_viewer(page_idx)
+        self._viewer.select_block_uids(
+            selected_uids if previous_page_uid == page.page_uid else ()
+        )
         total_blocks = sum(self._layout_block_count(page) for page in self._pages)
         failed = sum(1 for page in self._pages if bool(page.error))
         if failed:
@@ -788,8 +822,6 @@ class LayoutPanel(QWidget):
         self._refresh_block_search()
         self._update_project_stats()
         self._btn_run.setEnabled(bool(self._pages))
-        if self._pages:
-            self._page_list.set_current_index(0)
         self._update_page_nav()
 
     def reset(self) -> None:
@@ -797,6 +829,7 @@ class LayoutPanel(QWidget):
         self._pages = []
         self._current_page_idx = 0
         self._selected_block_uid = None
+        self._selected_block_uids = ()
         self._atom_boxes_by_page = {}
         self._page_gate_states.clear()
         self._primary_actions.clear()
@@ -1126,6 +1159,8 @@ class LayoutPanel(QWidget):
         changed = 0
         for page_idx, block_uids in affected.items():
             page = self._pages[page_idx]
+            changed_blocks: list[BlockView] = []
+            source_labels: list[str] = []
             for block_uid in block_uids:
                 block = self._layout_block_by_uid(page, block_uid)
                 if block is None:
@@ -1137,17 +1172,24 @@ class LayoutPanel(QWidget):
                 )
                 if not is_changed:
                     continue
-                revision = page.layout_revision
-                if revision is None:
-                    continue
-                self._emit_layout_command(LayoutEditCommand.change_type(
-                    page.page_uid,
-                    revision,
-                    block.block_uid,
-                    block_type=subtype.block_type,
-                    source_label=source_label,
-                ))
-                changed += 1
+                changed_blocks.append(block)
+                source_labels.append(source_label)
+            revision = page.layout_revision
+            if revision is None or not changed_blocks:
+                continue
+            common_source_label = (
+                source_labels[0]
+                if len(set(source_labels)) == 1
+                else subtype.source_label
+            )
+            self._emit_layout_command(LayoutEditCommand.change_types(
+                page.page_uid,
+                revision,
+                (block.block_uid for block in changed_blocks),
+                block_type=subtype.block_type,
+                source_label=common_source_label,
+            ))
+            changed += len(changed_blocks)
         self._set_status_text(f"已将 {changed} 个查找结果设为 {subtype.label}")
 
     def _create_type_button_grid(
@@ -1269,7 +1311,7 @@ class LayoutPanel(QWidget):
             self._sync_type_buttons(None)
 
     def _on_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
-        if self._selected_block_for_current_page() is not None:
+        if self._selected_blocks_for_current_page():
             self._on_selected_type_button_clicked(subtype)
             return
         self._set_new_block_type(subtype)
@@ -1295,6 +1337,21 @@ class LayoutPanel(QWidget):
         self._selection_mode_lbl.setText("选中类型:")
         self._selection_type_status.setText(_block_type_label(badge_type))
         self._selection_type_status.setToolTip(tooltip)
+
+    def _update_selection_type_status_many(
+        self,
+        count: int,
+        representative: BlockView | None = None,
+    ) -> None:
+        self._selection_mode_lbl.setText(f"已选 {count} 个:")
+        if representative is None:
+            self._selection_type_status.setText("混合")
+            self._selection_type_status.setToolTip("所选版面框类型不一致；点击类型可批量修改")
+            return
+        self._selection_type_status.setText(_block_type_label(representative.block_type))
+        self._selection_type_status.setToolTip(
+            f"所选 {count} 个版面框类型一致；点击类型可批量修改"
+        )
 
     @staticmethod
     def _heading_level_for_layout_view(view: LayoutBlockPresentation) -> int:
@@ -1384,6 +1441,7 @@ class LayoutPanel(QWidget):
         elif page.error:
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error}")
         self._selected_block_uid = None
+        self._selected_block_uids = ()
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
         self._update_project_stats()
@@ -1403,6 +1461,7 @@ class LayoutPanel(QWidget):
 
     def _clear_selection_ui(self, page: PageView) -> None:
         self._selected_block_uid = None
+        self._selected_block_uids = ()
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
         self._update_project_stats()
@@ -1415,8 +1474,47 @@ class LayoutPanel(QWidget):
         if block is None:
             return
         self._selected_block_uid = block_uid
+        self._selected_block_uids = (block_uid,)
         self._sync_selected_type_buttons(block)
         self._prop_conf.set_score(_ocr_observation_avg_confidence(page, block.uid))
+
+    def _on_block_selection_changed(self, block_uids: object) -> None:
+        if not self._pages:
+            return
+        values = tuple(
+            uid for uid in block_uids
+            if isinstance(uid, str) and uid
+        ) if isinstance(block_uids, (tuple, list)) else ()
+        page = self._pages[self._current_page_idx]
+        blocks = tuple(
+            block for uid in values
+            if (block := self._layout_block_by_uid(page, uid)) is not None
+        )
+        self._selected_block_uids = tuple(block.block_uid for block in blocks)
+        if len(blocks) == 1:
+            self._selected_block_uid = blocks[0].block_uid
+            self._sync_selected_type_buttons(blocks[0])
+            self._prop_conf.set_score(_ocr_observation_avg_confidence(page, blocks[0].block_uid))
+            return
+        self._selected_block_uid = None
+        self._prop_conf.hide()
+        if not blocks:
+            self._sync_selected_type_buttons(None)
+            return
+        first_label = self._button_source_label_for_block(blocks[0])
+        if all(self._button_source_label_for_block(block) == first_label for block in blocks[1:]):
+            self._sync_selected_type_buttons(blocks[0])
+            self._type_context_title.setText(f"已选 {len(blocks)} 个框")
+            self._update_selection_type_status_many(len(blocks), blocks[0])
+        else:
+            self._set_type_buttons_enabled(True)
+            self._set_type_button_checked(
+                self._type_group,
+                self._new_subtype_buttons,
+                None,
+            )
+            self._type_context_title.setText(f"已选 {len(blocks)} 个框")
+            self._update_selection_type_status_many(len(blocks))
 
     def _on_block_edit_started_uid(self, block_uid: str) -> None:
         if not block_uid or not self._pages:
@@ -1440,6 +1538,15 @@ class LayoutPanel(QWidget):
             return None
         page = self._pages[self._current_page_idx]
         return self._layout_block_by_uid(page, self._selected_block_uid)
+
+    def _selected_blocks_for_current_page(self) -> tuple[BlockView, ...]:
+        if not self._pages:
+            return ()
+        page = self._pages[self._current_page_idx]
+        return tuple(
+            block for uid in self._selected_block_uids
+            if (block := self._layout_block_by_uid(page, uid)) is not None
+        )
 
     def _layout_revision(self, page: PageView) -> int | None:
         if page.layout_revision is None:
@@ -1535,22 +1642,48 @@ class LayoutPanel(QWidget):
         self._viewer.delete_selected()
 
     def _on_selected_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
-        selected_block = self._selected_block_for_current_page()
-        if selected_block is None:
+        selected_blocks = self._selected_blocks_for_current_page()
+        if not selected_blocks:
             self._selected_block_uid = None
+            self._selected_block_uids = ()
             self._sync_selected_type_buttons(None)
             return
         new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
-        new_label = new_subtype.normalized_source_label
-        current_label = self._button_source_label_for_block(selected_block)
-        if selected_block.block_type == new_subtype.block_type and current_label == new_label:
-            self._sync_selected_type_buttons(selected_block)
-            return
         page = self._pages[self._current_page_idx]
-        source_label = self._source_label_for_subtype(page, selected_block, new_subtype)
+        source_labels = tuple(
+            self._source_label_for_subtype(page, block, new_subtype)
+            for block in selected_blocks
+        )
+        changed_blocks = tuple(
+            block for block, source_label in zip(selected_blocks, source_labels)
+            if (
+                block.block_type != new_subtype.block_type
+                or normalize_paddle_label(block.source_label) != normalize_paddle_label(source_label)
+            )
+        )
+        if not changed_blocks:
+            self._sync_selected_type_buttons(selected_blocks[0])
+            return
         revision = self._layout_revision(page)
         if revision is None:
             return
+        if len(selected_blocks) > 1:
+            common_source_label = (
+                source_labels[0]
+                if len(set(source_labels)) == 1
+                else new_subtype.source_label
+            )
+            self._emit_layout_command(LayoutEditCommand.change_types(
+                page.page_uid,
+                revision,
+                (block.block_uid for block in changed_blocks),
+                new_subtype.block_type,
+                common_source_label,
+            ))
+            self._set_status_text(f"已发出 {len(changed_blocks)} 个版面框的批量类型变更请求")
+            return
+        selected_block = selected_blocks[0]
+        source_label = source_labels[0]
         self._emit_layout_command(LayoutEditCommand.change_type(
             page.page_uid,
             revision,
@@ -1614,6 +1747,7 @@ class LayoutPanel(QWidget):
             "move": "已发出版面移动请求",
             "resize": "已发出版面缩放请求",
             "change_type": "已发出版面类型变更请求",
+            "change_types": "已发出批量版面类型变更请求",
             "merge": "已发出合并版面框请求",
         }.get(command.op, "已发出版面编辑请求")
         self._set_status_text(status_text)

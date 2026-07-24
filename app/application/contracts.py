@@ -264,7 +264,7 @@ class LayoutWorkspaceView:
 
 
 _EDIT_OPERATIONS = frozenset(
-    {"draw", "delete", "move", "resize", "change_type", "merge"}
+    {"draw", "delete", "move", "resize", "change_type", "change_types", "merge"}
 )
 
 
@@ -313,6 +313,10 @@ class LayoutEditCommand:
             self._require_block_uid()
         elif self.op == "change_type":
             self._require_block_uid()
+            self._require_block_type()
+        elif self.op == "change_types":
+            if not self.block_uids:
+                raise ValueError("change_types requires at least one block UID")
             self._require_block_type()
         elif self.op == "merge":
             if not self.block_uids:
@@ -417,6 +421,24 @@ class LayoutEditCommand:
             expected_revision=expected_revision,
             op="change_type",
             block_uid=block_uid,
+            block_type=block_type,
+            source_label=source_label,
+        )
+
+    @classmethod
+    def change_types(
+        cls,
+        page_uid: str,
+        expected_revision: int,
+        block_uids: Iterable[str],
+        block_type: BlockType,
+        source_label: str = "",
+    ) -> "LayoutEditCommand":
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="change_types",
+            block_uids=tuple(block_uids),
             block_type=block_type,
             source_label=source_label,
         )

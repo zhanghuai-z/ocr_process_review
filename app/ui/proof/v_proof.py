@@ -613,6 +613,7 @@ class VProofPanel(QWidget):
     def set_workspace(self, workspace: ProofWorkspaceView | None) -> None:
         """Replace the displayed immutable snapshot."""
 
+        self._hide_edit_bubble()
         if workspace is not None and not isinstance(workspace, ProofWorkspaceView):
             raise TypeError("VProofPanel requires ProofWorkspaceView or None")
         restore_tokens = self._selected_tokens_for_restore()
@@ -691,6 +692,7 @@ class VProofPanel(QWidget):
     def apply_workspace_patch(self, patch: ProofWorkspacePatch) -> None:
         """Re-index only the proof text units named by a committed patch."""
 
+        self._hide_edit_bubble()
         if self._workspace is None:
             raise RuntimeError("cannot apply a proof patch without a workspace")
         restore_tokens = self._selected_tokens_for_restore()
@@ -808,6 +810,7 @@ class VProofPanel(QWidget):
         return list(self._selected_tokens)
 
     def _on_char_selection_changed(self) -> None:
+        self._hide_edit_bubble()
         self._apply_char_selection()
 
     def _apply_char_selection(
@@ -1078,6 +1081,7 @@ class VProofPanel(QWidget):
         current: QListWidgetItem | None,
         _previous,
     ) -> None:
+        self._hide_edit_bubble()
         entry = current.data(Qt.ItemDataRole.UserRole) if current else None
         self._selected_entry = entry if isinstance(entry, ProofCharView) else None
         self._render_entry(self._selected_entry)
@@ -1266,7 +1270,7 @@ class VProofPanel(QWidget):
     def _apply_edit_bubble(self) -> None:
         text = self._edit_bubble_input.text()
         applied = self._apply_replacement_to_selected(text)
-        self._edit_bubble.hide()
+        self._hide_edit_bubble()
         if applied:
             message = f'✓ 已应用 "{text}" 到 {applied} 处' if applied > 1 else f'✓ 已应用 "{text}"'
             self._set_status_message(message, "ok")
@@ -1274,10 +1278,12 @@ class VProofPanel(QWidget):
             self._set_status_message("改字：当前页没有可替换的目标", "error")
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if watched is getattr(self, "_edit_bubble_input", None) and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Escape:
-                self._edit_bubble.hide()
+        if watched is getattr(self, "_edit_bubble_input", None):
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._hide_edit_bubble()
                 return True
+            if event.type() == QEvent.Type.FocusOut:
+                QTimer.singleShot(0, self._hide_edit_bubble)
         if (
             watched is self._image.viewport()
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -1286,6 +1292,10 @@ class VProofPanel(QWidget):
             scene_position = self._image.mapToScene(event.pos())
             self._on_image_point_clicked(scene_position.x(), scene_position.y())
         return super().eventFilter(watched, event)
+
+    def _hide_edit_bubble(self) -> None:
+        if hasattr(self, "_edit_bubble"):
+            self._edit_bubble.hide()
 
     # ─────────────────── candidates ───────────────────
 
