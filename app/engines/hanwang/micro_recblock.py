@@ -40,6 +40,12 @@ from .engcut_payload import (
     engcut_chars_from_payload,
     offset_engcut_chars,
 )
+from .geometry_postprocess import (
+    LineAtomGeometry,
+    conservative_cjk_bbox_cleanup,
+    is_latin_right_slant_fallback,
+    measure_latin_right_slant,
+)
 
 
 _ENGCUT_NATIVE_EXECUTOR = ThreadPoolExecutor(
@@ -81,11 +87,18 @@ PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE = (
     "ppocrv6:latin_token_text_route_foreground_geometry"
 )
 PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG = "latin_token_geometry_fallback"
+PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE = (
+    "ppocrv6:latin_token_text_route_foreground_geometry:italic_postcheck"
+)
+PPOCR_LATIN_ITALIC_WORD_FALLBACK_FLAG = "latin_italic_word_fallback"
 ENGCUT_DEGRADED_NATIVE_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_observation"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 PPOCR_SYMBOL_FOREGROUND_SOURCE = "ppocrv6:symbol_foreground_observation"
 VL_SEMANTIC_MARKER_SOURCE = "paddlevl:semantic_marker"
+LINECUT_NATIVE_ATOM_SOURCE = "hanwang:micro_recblock"
+LINECUT_CJK_CLEANUP_SOURCE = "hanwang:micro_recblock:cjk_empty_seam_cleanup"
+LINECUT_CJK_CLEANUP_FLAG = "linecut_cjk_empty_seam_bbox_cleanup"
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
 _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
@@ -227,7 +240,9 @@ class RunStats:
     geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
     latin_token_geometry_fallbacks: int = 0
+    latin_italic_word_fallbacks: int = 0
     latin_token_text_disagreements: int = 0
+    linecut_cjk_bbox_cleanups: int = 0
     ppocr_symbol_candidates_bound: int = 0
     ppocr_symbol_atoms_inserted: int = 0
     ppocr_symbol_observations_unbound: int = 0
@@ -326,6 +341,7 @@ class _EngCutMaskedLineRoute:
     segments: tuple[_TextRoute, ...]
     text_axis: str = TEXT_AXIS_HORIZONTAL
     orientation_angle: int = -1
+    ppocr_symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -444,6 +460,7 @@ def _engcut_masked_line_routes_from_lines(
                     segments=segments,
                     text_axis=line.text_axis,
                     orientation_angle=line.orientation_angle,
+                    ppocr_symbol_observations=line.ppocr_symbol_observations,
                 )
             )
     return grouped
@@ -869,6 +886,7 @@ def _assemble_layout_route_line(
     route: RoutingLine,
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
     stats: RunStats,
+    image_bgr: np.ndarray | None = None,
 ) -> list[_NativeLineResult]:
     segments = route.segments
     if not segments:
@@ -912,7 +930,7 @@ def _assemble_layout_route_line(
         merged_text_lines: list[_NativeLineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _apply_route_text_observations(
+        lines = _apply_route_text_observations(
             _merge_physical_routing_line(
                 merged_text_lines,
                 route_bbox=route.bbox,
@@ -920,6 +938,7 @@ def _assemble_layout_route_line(
             route,
             stats,
         )
+        return _postprocess_cjk_line_geometry(image_bgr, route, lines, stats)
 
     clusters = _cluster_lines_by_shape(all_text_lines)
     if not clusters:
@@ -1007,7 +1026,8 @@ def _assemble_layout_route_line(
                 review_flags=sorted(flags),
             )
         )
-    return _apply_route_text_observations(assembled, route, stats)
+    lines = _apply_route_text_observations(assembled, route, stats)
+    return _postprocess_cjk_line_geometry(image_bgr, route, lines, stats)
 
 
 def _assemble_routing_lines(
@@ -1016,6 +1036,7 @@ def _assemble_routing_lines(
     line_routes: tuple[RoutingLine, ...],
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
     stats: RunStats,
+    image_bgr: np.ndarray | None = None,
 ) -> list[_NativeLineResult]:
     if not line_routes:
         return []
@@ -1028,10 +1049,73 @@ def _assemble_routing_lines(
                 route=route,
                 grouped_lines=grouped_lines,
                 stats=stats,
+                image_bgr=image_bgr,
             )
         )
     assembled.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
     return assembled
+
+
+def _postprocess_cjk_line_geometry(
+    image_bgr: np.ndarray | None,
+    route: RoutingLine,
+    lines: list[_NativeLineResult],
+    stats: RunStats,
+) -> list[_NativeLineResult]:
+    if (
+        image_bgr is None
+        or route.text_axis != TEXT_AXIS_HORIZONTAL
+        or route.orientation_angle == 180
+    ):
+        return lines
+    processed: list[_NativeLineResult] = []
+    for line in lines:
+        atoms = [
+            LineAtomGeometry(
+                index=index,
+                text=atom.text,
+                bbox=atom.bbox,
+                source=atom.source,
+                granularity=atom.bbox_granularity,
+            )
+            for index, atom in enumerate(line.chars)
+        ]
+        proposals = conservative_cjk_bbox_cleanup(
+            image_bgr,
+            line.bbox,
+            atoms,
+            linecut_source=LINECUT_NATIVE_ATOM_SOURCE,
+        )
+        if not proposals:
+            processed.append(line)
+            continue
+        chars: list[_NativeAtomResult] = []
+        for index, atom in enumerate(line.chars):
+            proposal = proposals.get(index)
+            if proposal is None or atom.bbox is None:
+                chars.append(atom)
+                continue
+            chars.append(replace(
+                atom,
+                bbox=proposal,
+                source=LINECUT_CJK_CLEANUP_SOURCE,
+                external_candidates=[
+                    *atom.external_candidates,
+                    CharOcrCandidateObservation(
+                        text=atom.text,
+                        confidence=atom.confidence,
+                        source=LINECUT_NATIVE_ATOM_SOURCE,
+                        bbox=atom.bbox,
+                    ),
+                ],
+            ))
+        stats.linecut_cjk_bbox_cleanups += len(proposals)
+        processed.append(replace(
+            line,
+            chars=chars,
+            review_flags=sorted({*line.review_flags, LINECUT_CJK_CLEANUP_FLAG}),
+        ))
+    return processed
 
 
 def decode_gbk(code: int) -> str:
@@ -1767,6 +1851,7 @@ def _engcut_route_line_text_and_chars(
     source: str = LATIN_ENGCUT_ROUTE_SOURCE,
     ppocr_tokens: tuple[PpOcrLatinTokenObservation, ...] = (),
     foreground_word_bbox: tuple[int, int, int, int] | None = None,
+    italic_fallback_tokens: frozenset[PpOcrLatinTokenObservation] = frozenset(),
 ) -> tuple[str, list[_NativeAtomResult], bool]:
     text_parts: list[str] = []
     results: list[_NativeAtomResult] = []
@@ -1800,13 +1885,17 @@ def _engcut_route_line_text_and_chars(
                 "EngCut group has degraded character geometry without one "
                 f"uniquely bound PP word token: text={group_text!r}"
             )
+        degraded_tokens.add(token)
+    degraded_tokens.update(
+        token for token in italic_fallback_tokens if token in token_binding_counts
+    )
+    for token in degraded_tokens:
         indices = token_group_indices[token]
         if indices != list(range(indices[0], indices[-1] + 1)):
             raise RuntimeError(
                 "EngCut groups bound to one degraded PP word token are not contiguous: "
                 f"token={token.text!r} groups={indices}"
             )
-        degraded_tokens.add(token)
     emitted_degraded_tokens: set[PpOcrLatinTokenObservation] = set()
     for visible, token in zip(visible_groups, token_bindings):
         if token in degraded_tokens:
@@ -1835,6 +1924,11 @@ def _engcut_route_line_text_and_chars(
             native_chars = [char for group in token_groups for char in group]
             native_text = "".join(str(char.text or "") for char in native_chars)
             native_boxes = [char.bbox for char in native_chars if char.bbox is not None]
+            fallback_source = (
+                PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE
+                if token in italic_fallback_tokens
+                else PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE
+            )
             text_parts.append(token.text)
             results.append(_NativeAtomResult(
                 text=token.text,
@@ -1847,7 +1941,7 @@ def _engcut_route_line_text_and_chars(
                     source=ENGCUT_DEGRADED_NATIVE_SOURCE,
                     bbox=union_xyxy(native_boxes),
                 )],
-                source=PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE,
+                source=fallback_source,
                 bbox_granularity="word",
                 token_text=token.text,
             ))
@@ -1919,6 +2013,52 @@ def _engcut_route_line_text_and_chars(
             for char in visible
         )
     return "".join(text_parts), results, has_ppocr_text_disagreement
+
+
+def _latin_letter_count(text: str) -> int:
+    return sum(("A" <= char <= "Z") or ("a" <= char <= "z") for char in text)
+
+
+def _italic_word_fallback_tokens(
+    image_bgr: np.ndarray,
+    route: _EngCutMaskedLineRoute,
+    segment: _TextRoute,
+    chars: list[EngcutChar],
+) -> frozenset[PpOcrLatinTokenObservation]:
+    if (
+        route.text_axis != TEXT_AXIS_HORIZONTAL
+        or route.orientation_angle == 180
+        or len(segment.ppocr_latin_tokens) != 1
+    ):
+        return frozenset()
+    token = segment.ppocr_latin_tokens[0]
+    if _latin_letter_count(token.text) < 2:
+        return frozenset()
+    native_text = "".join(
+        str(char.text or "")
+        for group in _engcut_groups(chars)
+        for char in group
+        if str(char.text or "")
+    )
+    extra_symbols = {
+        char for char in native_text if not char.isalnum() and char not in token.text
+    }
+    has_owned_symbol_conflict = any(
+        observation.text in extra_symbols
+        and (
+            _intersect_xyxy(observation.bbox, segment.bbox) is not None
+            or _intersect_xyxy(observation.proposal_bbox, segment.bbox) is not None
+        )
+        for observation in route.ppocr_symbol_observations
+    )
+    if has_owned_symbol_conflict:
+        return frozenset()
+    measurement = measure_latin_right_slant(image_bgr, segment.bbox)
+    return (
+        frozenset((token,))
+        if is_latin_right_slant_fallback(measurement)
+        else frozenset()
+    )
 
 
 def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
@@ -2146,6 +2286,12 @@ def _recognize_engcut_masked_line(
             raise RuntimeError(f"EngCut received a non-Latin route: {segment.kind!r}")
         chars = grouped_by_route[segment.key]
         source = LATIN_ENGCUT_ROUTE_SOURCE
+        italic_fallback_tokens = _italic_word_fallback_tokens(
+            image_bgr,
+            route,
+            segment,
+            chars,
+        )
         text, char_results, has_token_disagreement = _engcut_route_line_text_and_chars(
             chars,
             source=source,
@@ -2153,6 +2299,7 @@ def _recognize_engcut_masked_line(
             foreground_word_bbox=(
                 segment.bbox if len(segment.ppocr_latin_tokens) == 1 else None
             ),
+            italic_fallback_tokens=italic_fallback_tokens,
         )
         if not text or not any(char.text.strip() for char in char_results):
             fallback_text = str(segment.ppocr_latin_fallback_text or "").strip()
@@ -2183,15 +2330,25 @@ def _recognize_engcut_masked_line(
             continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
         token_geometry_fallback_count = sum(
-            char.source == PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE
+            char.source in {
+                PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_SOURCE,
+                PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE,
+            }
+            for char in char_results
+        )
+        italic_word_fallback_count = sum(
+            char.source == PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE
             for char in char_results
         )
         stats.latin_token_geometry_fallbacks += token_geometry_fallback_count
+        stats.latin_italic_word_fallbacks += italic_word_fallback_count
         if has_token_disagreement:
             stats.latin_token_text_disagreements += 1
         review_flags: list[str] = []
         if token_geometry_fallback_count:
             review_flags.append(PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG)
+        if italic_word_fallback_count:
+            review_flags.append(PPOCR_LATIN_ITALIC_WORD_FALLBACK_FLAG)
         if has_token_disagreement:
             review_flags.append(PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG)
         results[segment.key] = _NativeLineResult(
@@ -2242,6 +2399,7 @@ def _recognize_engcut_masked_lines(
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
+            stats.latin_italic_word_fallbacks += local_stats.latin_italic_word_fallbacks
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((chunk[0], route_results))
             continue
@@ -2251,6 +2409,7 @@ def _recognize_engcut_masked_lines(
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
+            stats.latin_italic_word_fallbacks += local_stats.latin_italic_word_fallbacks
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((route, route_results))
     return results
@@ -3094,6 +3253,7 @@ def run_micro_recblock(
                 line_routes=native_line_routes,
                 grouped_lines=grouped_lines,
                 stats=stats,
+                image_bgr=image_bgr,
             )
             _normalize_digitlike_numeric_context_lines(lines)
             hw_text = "".join(line.text for line in lines).strip()

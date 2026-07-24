@@ -32,11 +32,11 @@
    - 标点不是第三个 native 分支。拉丁 token 内的 ASCII 标点可以随 word 进入 EngCut；外部标点和中文标点留在 LineCut。原生探针已验证 EngCut 可逐字符返回 `[`、`]` 和 `/`。
    - PP 标点 token 的空白范围不得切伤相邻拉丁字形。只有与唯一拉丁所有者共享水平墨迹投影、且未被显式 LineCut 所有权占用的完整组件可以归还该拉丁 token；竞争归属保持未决。单字符拉丁 token 只拥有小块墨迹时，仅在另外一个组件满足同字形的方向、间距和整体尺寸约束且候选唯一时补全几何，并记录 `single_latin_token_geometry_completed`；否则产生阻断 issue `incomplete_single_latin_token_ink`，不以残缺框继续 OCR。
    - 可唯一恢复完整组件的独立标点可保留为 `PpOcrSymbolObservation`。若 observation 与一个 native atom 严格一对一绑定且文本不同，只成为带独立来源和 bbox 的 `OcrCandidate`。若它唯一归属一条物理行、且 bbox 与任何 native atom 均不相交，可按 bbox 横向顺序创建明确标源的缺失符号 atom。多个行所有者、多个 native atom 所有者或与未认领 native atom 相交时均保持未绑定；不得替换或重排 native atom，也不能按文本邻近关系猜位置。
-   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本、原始 proposal bbox 和组件 mask。EngCut native group 的字符 bbox 不重叠时，CharOCR 文本和字符框保持主观察；唯一一对一且等长的 PP 文本分歧只保存为候选。若 native group 内字符 bbox 重叠，则字符几何和对应文本同时降级；只有该 segment 恰有一个 PP word token、且已有唯一前景所有权生成的 route bbox 时，才聚合同一 token 的连续 native groups，以 PP token 文本和 route 前景闭合 bbox 生成一次明确标源的 word atom，聚合 native 文本只作为外部候选。PP 原始 word bbox 仍是只读 observation，不成为最终 atom 几何。没有唯一 PP token、没有前景闭合几何或同 token groups 不连续时阻断，不保留损坏字符框。
+   - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本、原始 proposal bbox 和组件 mask。EngCut native group 的字符 bbox 不重叠且 token 没有命中右倾后判断时，CharOCR 文本和字符框保持主观察；唯一一对一且等长的 PP 文本分歧只保存为候选。若 native group 内字符 bbox 重叠，或至少含两个拉丁字母的唯一 token 在原图 route foreground 上命中右倾 `slope>=0.12` 且投影集中度改善 `>=0.05`，则字符几何和对应文本同时降级。只有该 segment 恰有一个 PP word token、且已有唯一前景所有权生成的 route bbox 时，才聚合同一 token 的连续 native groups，以 PP token 文本和 route 前景闭合 bbox 生成一次明确标源的 word atom，聚合 native 文本只作为外部候选。若额外 native 符号与本行明确的 `PpOcrSymbolObservation` 在该 segment 相交，右倾后判断不得吸收该符号。PP 原始 word bbox 仍是只读 observation，不成为最终 atom 几何。没有唯一 PP token、没有前景闭合几何或同 token groups 不连续时阻断，不保留损坏字符框。
 7. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 Paddle 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
 8. 路由运行摘要以追加记录持久化；CharOCR 输出写入 OCR observation。PP 标点候选绑定、缺失 atom 插入和未绑定分别进入运行统计；插入 atom 的 `text/bbox/source` 持久化到 OCR observation。`ppocr_symbol_missing_native_atom` 是执行期行 review flag，当前 `OcrLine` 持久化模型不保存行 review flags。公式文本仍由公式分支保有，不由 CharOCR 回填。
 
-EngCut 只处理已编译为 `text_latin` 的 crop。EngCut 对已有拉丁 route 完全无输出时，可采用该 typed route 自带的 PP 文本生成明确标源的 word fallback；EngCut native group 字符框重叠时，可由唯一绑定的 PP word token 接管文本，并由该 token 唯一前景所有权生成的 route bbox 接管最终 word 几何。原始 PP word bbox 不直接成为最终 atom 几何。除此之外，非空且几何可靠的 CharOCR 文本不得与 PP/VL 择优；禁止恢复旧的全页文本搜索、模糊匹配、整行静默回填或按字符串猜位置链路。
+EngCut 只处理已编译为 `text_latin` 的 crop。EngCut 对已有拉丁 route 完全无输出时，可采用该 typed route 自带的 PP 文本生成明确标源的 word fallback；EngCut native group 字符框重叠或唯一 token 命中上述右倾后判断时，可由唯一绑定的 PP word token 接管文本，并由该 token 唯一前景所有权生成的 route bbox 接管最终 word 几何。原始 PP word bbox 不直接成为最终 atom 几何。除此之外，非空且几何可靠的 CharOCR 文本不得与 PP/VL 择优；禁止恢复旧的全页文本搜索、模糊匹配、整行静默回填或按字符串猜位置链路。
 
 路由 segment 的 `bbox` 是行内 mask/crop 几何；公式可另外保留完整布局框 `content_bbox`。`text_latin` 可携带只读 `ppocr_latin_tokens`，行还可携带 `PpOcrSymbolObservation`；它们都不是布局或校对真值。
 
@@ -45,7 +45,8 @@ EngCut 只处理已编译为 `text_latin` 的 crop。EngCut 对已有拉丁 rout
 - 纯中文、纯英文/数字和混合行都必须先经过同一阶段的结构扣除；公式优先级高于文字分流。
 - PP-OCR word-box 默认承担几何 proposal；唯一绑定的等长拉丁文本分歧只能产生明确标源的 `OcrCandidate`。独立标点除候选路径外，只在唯一行归属且与全部 native atom 不相交时生成明确标源的缺失 atom，不能替换已有 CharOCR 正文。
 - PP-OCR 的拉丁 token 只能生成自己的 word mask；中文、外部标点和 token 外区域属于 LineCut。独立标点 observation 只提供文本与组件证据，不成为第三个 native 分支。
-- PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。除 EngCut 空结果的显式 route-local word fallback 和上述独立标点缺失 atom 外，当前不使用整行回退、PP 文本回填或静默猜测。
+- PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。合法 PP 文本路径仅包括 EngCut 空结果 fallback、重叠/右倾几何退级所需的唯一 token word atom，以及上述独立标点缺失 atom；它们都必须有唯一几何绑定和明确来源。当前不使用整行回退、模糊文本回填或静默猜测。
+- 横排 LineCut 单 CJK atom 可在物理行组装后执行空缝内收：只使用原图暗色前景、相邻可见 atom 中心间的无墨迹纵向缝和行内 CJK 高度带；候选只能缩入原 native bbox，槽边有墨迹或搜索区无空缝时保持原框。变更后的 atom 使用独立来源并把原 LineCut bbox 保留为外部候选观察；不改变字符文本、顺序、路由或 Proof。
 - 深色底白字和表格横线属于同一连通域分流算法的输入场景，不建立页面类型特判。
 - PP token proposal 与黏连组件存在交集时可生成受限片段。除上述两种显式 observation 外，片段仍只是本次路由 mask。
 - 路由失败只阻断对应页面；同批其他页面可继续。失败页必须保留可审计 issue，不能退回整块 OCR。
