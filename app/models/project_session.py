@@ -1450,6 +1450,40 @@ class ProjectSession:
                 proof_store._records.pop(uid, None)
             raise
 
+    def adopt_ocr_page_failure(
+        self,
+        *,
+        run: OcrRun,
+        batch: OcrBatch,
+        pointer: OcrActivePointer,
+        expected_pointer_revision: int,
+        expected_pointer_fingerprint: str | None,
+    ) -> None:
+        """Adopt one failed OCR attempt without creating machine text or proof."""
+        if run.status != "failed" or batch.status != "failed":
+            raise InvalidRecordError("OCR failure adoption requires failed run and batch")
+        if batch.region_uids or batch.line_uids or batch.atom_uids or batch.candidate_uids:
+            raise InvalidRecordError("OCR failure batch cannot contain observations")
+        ocr = self.ocr_observation_repository
+        ocr.append_observation_batch(
+            run=run,
+            regions=(),
+            lines=(),
+            atoms=(),
+            candidates=(),
+            batch=batch,
+        )
+        try:
+            ocr.switch_active_pointer(
+                pointer,
+                expected_revision=expected_pointer_revision,
+                expected_fingerprint=expected_pointer_fingerprint,
+            )
+        except Exception:
+            ocr._runs.pop(run.uid, None)
+            ocr._batches.pop(batch.uid, None)
+            raise
+
     @classmethod
     def from_records(
         cls,

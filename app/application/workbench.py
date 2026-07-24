@@ -51,6 +51,8 @@ from app.services.layout_edit_service import (
 from app.services.ocr_job_service import (
     OcrJobService,
     OcrPageCommit,
+    OcrPageFailureCommit,
+    OcrPageJobFailure,
     OcrPageJobRequest,
     OcrPageJobResult,
 )
@@ -211,6 +213,14 @@ class WorkbenchApplication:
 
     def commit_ocr_page(self, result: OcrPageJobResult) -> OcrPageCommit:
         commit = self._require_ocr_service().commit_page(self._require_session(), result)
+        self._dirty = True
+        return commit
+
+    def commit_ocr_failure(self, failure: OcrPageJobFailure) -> OcrPageFailureCommit:
+        commit = self._require_ocr_service().commit_page_failure(
+            self._require_session(),
+            failure,
+        )
         self._dirty = True
         return commit
 

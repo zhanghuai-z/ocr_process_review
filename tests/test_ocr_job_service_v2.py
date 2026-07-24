@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import numpy as np
@@ -8,6 +9,9 @@ import pytest
 import app.services.ocr_job_service as module
 from app.application.ocr_workspace import build_ocr_workspace_view
 from app.core.layout_scope import layout_snapshot_fingerprint
+from app.core.ocr_currentness import current_ocr_failure, current_ocr_observation
+from app.core.workflow_state import page_gate_info
+from app.infrastructure.project_store import load_session, save_session
 from app.models.charocr_execution import (
     CharOcrAtomObservation,
     CharOcrCandidateObservation,
@@ -24,9 +28,10 @@ from app.models.paddle_artifact import PaddleArtifact
 from app.models.ocr_records import OcrActivePointer
 from app.models.project_session import (
     BindingRecord, PageRecord, ProjectRecord, ProjectSession, RecordNotFoundError,
+    RevisionConflictError,
 )
 from app.models.proof_records import ProofAnchorSnapshot, ProofState, ProofTextUnit
-from app.services.ocr_job_service import OcrJobService
+from app.services.ocr_job_service import OcrJobService, OcrPageJobFailure
 
 
 def _session(*, with_proof: bool = True) -> ProjectSession:
@@ -169,6 +174,85 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     assert workspace.pages[0].regions[0].block_uid == "block-1"
     assert workspace.pages[0].regions[0].lines[0].text == "machine、"
     assert workspace.pages[0].regions[0].lines[0].atoms[0].text == "machine"
+
+
+def test_failed_page_attempt_persists_without_changing_proof_and_can_be_retried(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    session = _session()
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    proof_before = session.proof_repository.get_state("proof-1")
+    request = service.prepare_page(session, "page-1", image_bgr=image)
+
+    failure_commit = service.commit_page_failure(
+        session,
+        OcrPageJobFailure(request, "native OCR timeout"),
+    )
+
+    failure = current_ocr_failure(session, "page-1")
+    assert failure is not None
+    assert failure.message == "native OCR timeout"
+    assert failure.pointer.revision == failure_commit.pointer_revision == 1
+    assert failure.batch.region_uids == ()
+    assert current_ocr_observation(session, "page-1") is None
+    assert session.proof_repository.get_state("proof-1") == proof_before
+    gate = page_gate_info(session, "page-1")
+    assert gate.page_state == "ocr_error"
+    assert gate.reason_code == "ocr_failed"
+    assert gate.action_key == "rerun_ocr"
+    assert gate.action_enabled is True
+
+    project_path = tmp_path / "failed-attempt.ocrproj"
+    save_session(project_path, session)
+    reopened = load_session(project_path, expected_project_uid="project-1")
+    reopened_failure = current_ocr_failure(reopened, "page-1")
+    assert reopened_failure is not None
+    assert reopened_failure.message == "native OCR timeout"
+    assert reopened.proof_repository.get_state("proof-1") == proof_before
+
+    layout = reopened.layout_repository.get("page-1")
+    routing = PageRoutingPlan(
+        page_uid="page-1",
+        routing_run_uid="routing-retry",
+        layout_fingerprint=layout_snapshot_fingerprint(layout),
+        prepass_run_id="prepass-retry",
+        blocks=(),
+    )
+    monkeypatch.setattr(module, "acquire_routing_observation_bundle", lambda **_kwargs: object())
+    monkeypatch.setattr(module, "compile_page_routing_plan", lambda *_args, **_kwargs: routing)
+    retry_request = service.prepare_page(reopened, "page-1", image_bgr=image)
+    assert retry_request.expected_pointer_revision == failure_commit.pointer_revision
+    success = service.commit_page(reopened, service.execute_page(retry_request))
+
+    pointer = reopened.ocr_observation_repository.get_active_pointer("page-1")
+    assert pointer.uid == failure.pointer.uid
+    assert pointer.revision == success.pointer_revision == 2
+    assert current_ocr_failure(reopened, "page-1") is None
+    assert current_ocr_observation(reopened, "page-1") is not None
+    proof_after = reopened.proof_repository.get_state("proof-1")
+    assert proof_after.text_units[0].text == "human correction"
+    assert proof_after.rebind_required is True
+
+
+def test_stale_failed_page_attempt_cannot_replace_a_newer_layout() -> None:
+    session = _session()
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    request = service.prepare_page(session, "page-1", image_bgr=image)
+    layout = session.layout_repository.get("page-1")
+    session.layout_repository.put(replace(layout, revision=2), expected_revision=1)
+
+    with pytest.raises(RevisionConflictError, match="revision mismatch"):
+        service.commit_page_failure(
+            session,
+            OcrPageJobFailure(request, "late worker failure"),
+        )
+
+    with pytest.raises(RecordNotFoundError):
+        session.ocr_observation_repository.get_active_pointer("page-1")
+    assert session.proof_repository.get_state("proof-1").text_units[0].text == "human correction"
 
 
 def test_first_page_ocr_creates_editable_proof_state_with_exact_alignment(monkeypatch) -> None:

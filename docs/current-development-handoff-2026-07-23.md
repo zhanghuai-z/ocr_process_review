@@ -12,7 +12,7 @@
 - 本轮研究起始基线：`2620f29 fix: use routed foreground for degraded words`
 - 本轮研究开始时，该分支领先远端 45 个提交。
 - 工作区包含大量用户样例、实验脚本、未跟踪文件和已删除的旧报告。不要批量清理、恢复或提交它们。
-- 最近完整回归：`344 passed in 19.65s`。
+- 最近完整回归：`366 passed in 22.13s`（2026-07-24，WSL、`QT_QPA_PLATFORM=offscreen`）。
 
 开始工作前执行：
 
@@ -69,7 +69,7 @@ python -m pytest -q
 3. `acquire_routing_observation_bundle()` 将观察绑定到 page UID、image hash 和 layout fingerprint。
 4. `compile_page_routing_plan()` 编译页面局部、不可变的路由计划。
 5. 仅可分派计划进入 `compile_charocr_page_request()` 和 CharOCR。
-6. `commit_page()` 在应用线程校验 page/layout/artifact/pointer 后原子采纳 OCR observations，并创建或标记 proof rebind。
+6. `commit_page()` 在应用线程校验 page/layout/artifact/pointer 后原子采纳成功的 OCR observations，并创建或标记 proof rebind。执行失败则由 `commit_page_failure()` 采纳空的 failed run/batch 并推进同一 active pointer；失败不创建或修改 `ProofState`，保存重开后仍可重试，成功重试继续通过 pointer CAS 接管。
 
 已接受的路由原则：
 
@@ -143,6 +143,8 @@ CJK 字框清理 JSON、`族` 对照、空谷候选和边界风险回显位于 `
 以旧成熟 UI `7134bfc^` 为对照，已核对 24 项能力：22 项等价恢复。
 
 已恢复但仍需 Windows 交互验收：纵校 `Shift+Alt+左右`、`Ctrl+Alt+左右` 高级实例选择快捷键，以及横校左侧页面目录折叠。两者只维护面板 UI 状态。
+
+OCR 提交已恢复为“当前页优先，其余待处理页随后”的批次；待处理包括首次进入、输入变更后失效和最近一次执行失败的页面。失败状态属于 OCR run/batch observation，不复用页面级 `PageRecord.error`，也不覆盖已有人工校对文本。
 
 旧 quality-probe 假字注入、可变页面合并和兼容字段诊断不是应恢复的用户能力。
 

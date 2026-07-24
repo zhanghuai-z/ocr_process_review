@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.ocr_currentness import current_ocr_observation, has_active_ocr_pointer
+from app.core.ocr_currentness import (
+    current_ocr_failure,
+    current_ocr_observation,
+    has_active_ocr_pointer,
+)
 from app.models.project_session import PageRecord, ProjectSession, RecordNotFoundError
 
 
@@ -124,6 +128,17 @@ def page_gate_info(session: ProjectSession, page_uid: str) -> PageGateInfo:
             action_key="enter_ocr",
             action_label="提交并进入 OCR",
             action_enabled=False,
+        )
+    failure = current_ocr_failure(session, page.uid)
+    if failure is not None:
+        return PageGateInfo(
+            page_state="ocr_error",
+            is_pending=True,
+            reason_code="ocr_failed",
+            reason_text=f"当前页 OCR 失败：{failure.message}",
+            action_key="rerun_ocr",
+            action_label="重新进入 OCR",
+            action_enabled=True,
         )
     if _has_ocr(session, page.uid):
         return PageGateInfo(

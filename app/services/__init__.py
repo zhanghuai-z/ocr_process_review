@@ -15,6 +15,8 @@ from .ocr_job_service import (
     OcrJobService,
     OcrObservationUnit,
     OcrPageCommit,
+    OcrPageFailureCommit,
+    OcrPageJobFailure,
     OcrPageJobRequest,
     OcrPageJobResult,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "OcrJobService",
     "OcrObservationUnit",
     "OcrPageCommit",
+    "OcrPageFailureCommit",
+    "OcrPageJobFailure",
     "OcrPageJobRequest",
     "OcrPageJobResult",
     "PaddleLayoutClient",

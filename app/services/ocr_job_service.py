@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -53,6 +54,26 @@ class OcrPageCommit:
     pointer_revision: int
     proof_states_created: int
     proof_states_marked_for_rebind: int
+
+
+@dataclass(frozen=True, slots=True)
+class OcrPageFailureCommit:
+    page_uid: str
+    run_uid: str
+    batch_uid: str
+    pointer_revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class OcrPageJobFailure:
+    request: "OcrPageJobRequest"
+    message: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, OcrPageJobRequest):
+            raise TypeError("OCR page failure requires its immutable request")
+        if not isinstance(self.message, str) or not self.message.strip():
+            raise ValueError("OCR page failure requires a non-empty message")
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +331,89 @@ class OcrJobService:
             pointer_revision=pointer.revision,
             proof_states_created=len(new_proof_states),
             proof_states_marked_for_rebind=len(proof_states),
+        )
+
+    def commit_page_failure(
+        self,
+        session: ProjectSession,
+        failure: OcrPageJobFailure,
+    ) -> OcrPageFailureCommit:
+        """CAS-adopt one failed OCR attempt without changing proof state."""
+        if not isinstance(failure, OcrPageJobFailure):
+            raise TypeError("OCR failure commit requires OcrPageJobFailure")
+        job = failure.request
+        if session.project_uid != job.project_uid:
+            raise RuntimeError("OCR failure belongs to another project session")
+        page = session.page_repository.get(job.page.uid, fingerprint=job.page.fingerprint)
+        layout = session.layout_repository.get(page.uid, revision=job.layout.revision)
+        layout_fingerprint = layout_snapshot_fingerprint(layout)
+        if layout_fingerprint != layout_snapshot_fingerprint(job.layout):
+            raise RuntimeError("OCR failure belongs to a stale layout snapshot")
+        session.paddle_artifact_repository.get(
+            job.artifact.uid,
+            fingerprint=job.artifact.fingerprint,
+        )
+        input_fingerprint = hashlib.sha256(
+            "\0".join((
+                page.fingerprint,
+                layout_fingerprint,
+                job.artifact.fingerprint,
+                self._engine.engine_id,
+            )).encode("utf-8")
+        ).hexdigest()
+        run = OcrRun(
+            project_uid=session.project_uid,
+            uid=_uid("ocrrun"),
+            engine=self._engine.engine_id,
+            layout_fingerprint=layout_fingerprint,
+            input_fingerprint=input_fingerprint,
+            status="failed",
+            metadata=(
+                ("page_uid", page.uid),
+                ("page_fingerprint", page.fingerprint),
+                ("image_hash", page.image_hash),
+                ("error", failure.message.strip()),
+            ),
+        )
+        batch = OcrBatch(
+            project_uid=session.project_uid,
+            uid=_uid("ocrbatch"),
+            run_uid=run.uid,
+            scope_uid=page.uid,
+            input_fingerprint=input_fingerprint,
+            layout_fingerprint=layout_fingerprint,
+            status="failed",
+        )
+        if job.expected_pointer_revision == 0:
+            pointer_uid = f"ocrptr_{page.uid}"
+        else:
+            current_pointer = session.ocr_observation_repository.get_active_pointer(
+                page.uid,
+                revision=job.expected_pointer_revision,
+                fingerprint=job.expected_pointer_fingerprint,
+            )
+            pointer_uid = current_pointer.uid
+        pointer = OcrActivePointer(
+            project_uid=session.project_uid,
+            uid=pointer_uid,
+            scope_uid=page.uid,
+            batch_uid=batch.uid,
+            run_uid=run.uid,
+            batch_fingerprint=batch.fingerprint,
+            revision=job.expected_pointer_revision + 1,
+        )
+        session.adopt_ocr_page_failure(
+            run=run,
+            batch=batch,
+            pointer=pointer,
+            expected_pointer_revision=job.expected_pointer_revision,
+            expected_pointer_fingerprint=job.expected_pointer_fingerprint,
+        )
+        return OcrPageFailureCommit(
+            page_uid=page.uid,
+            run_uid=run.uid,
+            batch_uid=batch.uid,
+            pointer_revision=pointer.revision,
         )
 
     @staticmethod
@@ -573,6 +677,8 @@ __all__ = [
     "OcrJobService",
     "OcrObservationUnit",
     "OcrPageCommit",
+    "OcrPageFailureCommit",
+    "OcrPageJobFailure",
     "OcrPageJobRequest",
     "OcrPageJobResult",
 ]

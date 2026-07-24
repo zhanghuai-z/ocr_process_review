@@ -41,6 +41,7 @@ from app.services import (
     LayoutPageJobResult,
     OcrJobService,
     OcrPageCommit,
+    OcrPageJobFailure,
     OcrPageJobRequest,
     OcrPageJobResult,
     ProjectFileService,
@@ -125,7 +126,7 @@ class _OcrServiceWorker(QThread):
     progress = Signal(object)
     cancelled = Signal()
     failed = Signal(str)
-    page_failed = Signal(str, str)
+    page_failed = Signal(object)
 
     def __init__(
         self,
@@ -175,10 +176,14 @@ class _OcrServiceWorker(QThread):
                 except _TaskCancelled:
                     raise
                 except Exception as exc:
-                    self.page_failed.emit(page_uid, str(exc))
+                    message = str(exc).strip() or type(exc).__name__
+                    self.page_failed.emit(OcrPageJobFailure(request, message))
                     continue
                 if not isinstance(result, OcrPageJobResult):
-                    self.page_failed.emit(page_uid, "OcrJobService returned an invalid result")
+                    self.page_failed.emit(OcrPageJobFailure(
+                        request,
+                        "OcrJobService returned an invalid result",
+                    ))
                     continue
                 results.append(result)
                 self.progress.emit(WorkflowProgressState(
@@ -690,9 +695,7 @@ class WorkflowController(QObject):
         worker.committed.connect(self._on_ocr_committed)
         worker.cancelled.connect(self._on_ocr_cancelled)
         worker.failed.connect(self._on_worker_failed)
-        worker.page_failed.connect(
-            lambda page_uid, message: self.worker_error.emit(f"page {page_uid}: {message}")
-        )
+        worker.page_failed.connect(self._on_ocr_page_failed)
         worker.finished.connect(lambda: self._clear_worker("_ocr_worker", worker))
         self._emit_view_state()
         worker.start()
@@ -724,6 +727,23 @@ class WorkflowController(QObject):
             self._emit_view_state()
             return
         self.ocr_finished.emit()
+        self.refresh_page_gate_states()
+        self._emit_session_state()
+
+    def _on_ocr_page_failed(self, failure: object) -> None:
+        if not isinstance(failure, OcrPageJobFailure):
+            self._on_worker_failed("OcrJobService emitted an invalid page failure")
+            return
+        page_uid = failure.request.page.uid
+        if not self._application.has_project or self._ocr_job_service is None:
+            self._on_worker_failed("OCR failure has no active application context")
+            return
+        try:
+            self._application.commit_ocr_failure(failure)
+        except Exception as exc:
+            self.worker_error.emit(f"page {page_uid}: {exc}")
+            return
+        self.worker_error.emit(f"page {page_uid}: {failure.message}")
         self.refresh_page_gate_states()
         self._emit_session_state()
 
