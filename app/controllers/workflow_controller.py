@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 import tempfile
+from threading import Lock
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -52,6 +54,24 @@ class _TaskCancelled(RuntimeError):
     """Internal worker control flow for cooperative cancellation."""
 
 
+def _configured_page_workers(
+    key: str,
+    *,
+    default: int,
+    cap: int,
+    total: int,
+) -> int:
+    """Resolve one bounded page-worker count from application settings."""
+
+    if total <= 1:
+        return 1
+    try:
+        configured = int(get_config().get(key, default))
+    except (TypeError, ValueError):
+        configured = default
+    return max(1, min(total, cap, configured))
+
+
 class _ImportServiceWorker(QThread):
     """Decode immutable import input without access to ProjectSession."""
 
@@ -90,33 +110,77 @@ class _LayoutServiceWorker(QThread):
         self,
         service: LayoutAnalysisService,
         requests: tuple[LayoutPageJobRequest, ...],
+        *,
+        max_workers: int = 1,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
         self._requests = requests
+        self._max_workers = max(1, min(len(requests) or 1, int(max_workers)))
 
     def run(self) -> None:
         try:
-            results: list[LayoutPageJobResult] = []
             total = len(self._requests)
-            for index, request in enumerate(self._requests):
+            if self._max_workers <= 1:
+                results: list[LayoutPageJobResult] = []
+                for index, request in enumerate(self._requests):
+                    if self.isInterruptionRequested():
+                        raise _TaskCancelled
+                    self.stage.emit(request.page_uid, index + 1, total, "版面分析")
+                    results.append(self._service.execute_page(request))
+                    self.progress.emit(index + 1, total)
                 if self.isInterruptionRequested():
                     raise _TaskCancelled
-                self.stage.emit(request.page_uid, index, total, "版面分析")
-                results.append(self._service.execute_page(request))
-                self.progress.emit(index + 1, total)
-                self.stage.emit(request.page_uid, index + 1, total, "版面分析")
-            if self.isInterruptionRequested():
-                self.cancelled.emit()
+                self.committed.emit(tuple(results))
                 return
+
+            indexed_results: list[LayoutPageJobResult | None] = [None] * total
+            executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="layout-page",
+            )
+            futures = {
+                executor.submit(self._service.execute_page, request): index
+                for index, request in enumerate(self._requests)
+            }
+            pending = set(futures)
+            completed = 0
+            try:
+                while pending:
+                    if self.isInterruptionRequested():
+                        raise _TaskCancelled
+                    done, pending = wait(
+                        pending,
+                        timeout=0.1,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        index = futures[future]
+                        request = self._requests[index]
+                        indexed_results[index] = future.result()
+                        completed += 1
+                        self.progress.emit(completed, total)
+                        self.stage.emit(request.page_uid, completed, total, "版面分析")
+                if self.isInterruptionRequested():
+                    raise _TaskCancelled
+            finally:
+                if self.isInterruptionRequested():
+                    for future in pending:
+                        future.cancel()
+                executor.shutdown(
+                    wait=True,
+                    cancel_futures=True,
+                )
+            if any(result is None for result in indexed_results):
+                raise RuntimeError("layout worker completed without every page result")
+            self.committed.emit(tuple(indexed_results))
         except _TaskCancelled:
             self.cancelled.emit()
             return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.committed.emit(tuple(results))
 
 
 class _OcrServiceWorker(QThread):
@@ -132,76 +196,128 @@ class _OcrServiceWorker(QThread):
         self,
         service: OcrJobService,
         requests: tuple[OcrPageJobRequest, ...],
+        *,
+        max_workers: int = 1,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
         self._requests = requests
+        self._max_workers = max(1, min(len(requests) or 1, int(max_workers)))
 
     def run(self) -> None:
-        results: list[OcrPageJobResult] = []
         total = len(self._requests)
-        try:
-            for index, request in enumerate(self._requests):
-                if self.isInterruptionRequested():
-                    raise _TaskCancelled
-                page_uid = request.page.uid
+        indexed_results: list[OcrPageJobResult | None] = [None] * total
+        completed_pages = 0
+        completed_lock = Lock()
+        emit_lock = Lock()
+
+        def completed_count() -> int:
+            with completed_lock:
+                return completed_pages
+
+        def execute(request: OcrPageJobRequest) -> OcrPageJobResult:
+            page_uid = request.page.uid
+            with emit_lock:
                 self.progress.emit(WorkflowProgressState(
                     phase="ocr",
                     current=0,
                     total=0,
-                    completed_pages=index,
+                    completed_pages=completed_count(),
                     total_pages=total,
                     message="准备识别",
                     page_uid=page_uid,
                 ))
-                def on_progress(current: int, block_total: int, message: str) -> None:
-                    if self.isInterruptionRequested():
-                        raise _TaskCancelled
+
+            def on_progress(current: int, block_total: int, message: str) -> None:
+                if self.isInterruptionRequested():
+                    raise _TaskCancelled
+                with emit_lock:
                     self.progress.emit(WorkflowProgressState(
                         phase="ocr",
                         current=current,
                         total=block_total,
-                        completed_pages=index,
+                        completed_pages=completed_count(),
                         total_pages=total,
                         message=message,
                         page_uid=page_uid,
                     ))
 
-                try:
-                    result = self._service.execute_page(
-                        request,
-                        progress_callback=on_progress,
+            return self._service.execute_page(
+                request,
+                progress_callback=on_progress,
+            )
+
+        try:
+            executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="charocr-page",
+            )
+            futures = {
+                executor.submit(execute, request): index
+                for index, request in enumerate(self._requests)
+            }
+            pending = set(futures)
+            try:
+                while pending:
+                    if self.isInterruptionRequested():
+                        raise _TaskCancelled
+                    done, pending = wait(
+                        pending,
+                        timeout=0.1,
+                        return_when=FIRST_COMPLETED,
                     )
-                except _TaskCancelled:
-                    raise
-                except Exception as exc:
-                    message = str(exc).strip() or type(exc).__name__
-                    self.page_failed.emit(OcrPageJobFailure(request, message))
-                    continue
-                if not isinstance(result, OcrPageJobResult):
-                    self.page_failed.emit(OcrPageJobFailure(
-                        request,
-                        "OcrJobService returned an invalid result",
-                    ))
-                    continue
-                results.append(result)
-                self.progress.emit(WorkflowProgressState(
-                    phase="ocr",
-                    current=1,
-                    total=1,
-                    completed_pages=index + 1,
-                    total_pages=total,
-                    message="已完成",
-                    page_uid=page_uid,
-                ))
+                    for future in done:
+                        index = futures[future]
+                        request = self._requests[index]
+                        page_succeeded = False
+                        try:
+                            result = future.result()
+                        except _TaskCancelled:
+                            raise
+                        except Exception as exc:
+                            message = str(exc).strip() or type(exc).__name__
+                            self.page_failed.emit(OcrPageJobFailure(request, message))
+                        else:
+                            if not isinstance(result, OcrPageJobResult):
+                                self.page_failed.emit(OcrPageJobFailure(
+                                    request,
+                                    "OcrJobService returned an invalid result",
+                                ))
+                            else:
+                                indexed_results[index] = result
+                                page_succeeded = True
+                        with completed_lock:
+                            completed_pages += 1
+                            completed = completed_pages
+                        self.progress.emit(WorkflowProgressState(
+                            phase="ocr",
+                            current=1,
+                            total=1,
+                            completed_pages=completed,
+                            total_pages=total,
+                            message="已完成" if page_succeeded else "识别失败",
+                            page_uid=request.page.uid,
+                        ))
+                if self.isInterruptionRequested():
+                    raise _TaskCancelled
+            finally:
+                if self.isInterruptionRequested():
+                    for future in pending:
+                        future.cancel()
+                executor.shutdown(
+                    wait=True,
+                    cancel_futures=True,
+                )
         except _TaskCancelled:
             self.cancelled.emit()
             return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.committed.emit(tuple(results))
+        self.committed.emit(tuple(
+            result for result in indexed_results if result is not None
+        ))
 
 
 class WorkflowController(QObject):
@@ -572,7 +688,13 @@ class WorkflowController(QObject):
         worker = _LayoutServiceWorker(
             service,
             requests,
-            self,
+            max_workers=_configured_page_workers(
+                "layout_concurrency",
+                default=8,
+                cap=10,
+                total=len(requests),
+            ),
+            parent=self,
         )
         self._layout_worker = worker
         self._set_layout_run_enabled(False)
@@ -689,7 +811,17 @@ class WorkflowController(QObject):
                 self.worker_error.emit(f"page {page_uid}: {exc}")
         if not requests:
             raise RuntimeError("OCR has no page that can be prepared")
-        worker = _OcrServiceWorker(service, tuple(requests), self)
+        worker = _OcrServiceWorker(
+            service,
+            tuple(requests),
+            max_workers=_configured_page_workers(
+                "ocr_page_concurrency",
+                default=2,
+                cap=20,
+                total=len(requests),
+            ),
+            parent=self,
+        )
         self._ocr_worker = worker
         worker.progress.connect(self._on_ocr_progress)
         worker.committed.connect(self._on_ocr_committed)
