@@ -33,6 +33,19 @@ def test_detects_long_dot_leader_without_absorbing_trailing_parenthesis():
     assert result == (TextDecoration(DOT_LEADER, (140, 42, 487, 47)),)
 
 
+def test_extends_proven_leader_to_regular_mark_clipped_by_vendor_token() -> None:
+    image = _leader_image(20)
+    image[42:47, 100:105] = 0
+
+    result = detect_text_decorations(
+        image,
+        (10, 10, 590, 70),
+        (DecorationToken("……(", (158, 10, 540, 70)),),
+    )
+
+    assert result == (TextDecoration(DOT_LEADER, (140, 42, 487, 47)),)
+
+
 def test_does_not_classify_ordinary_ellipsis_as_a_dot_leader():
     image = _leader_image(6)
 

@@ -340,6 +340,7 @@ class _EngCutMaskedLineRoute:
     line_idx: int
     bbox: tuple[int, int, int, int]
     segments: tuple[_TextRoute, ...]
+    excluded_segments: tuple[_TextRoute, ...] = ()
     text_axis: str = TEXT_AXIS_HORIZONTAL
     orientation_angle: int = -1
     ppocr_symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
@@ -437,7 +438,7 @@ def _engcut_masked_line_routes_from_lines(
     """
     grouped: list[_EngCutMaskedLineRoute] = []
     for line_idx, line in enumerate(lines):
-        segments = tuple(
+        typed = tuple(
             _TextRoute(
                 block_idx=block_idx,
                 line_idx=line_idx,
@@ -450,6 +451,9 @@ def _engcut_masked_line_routes_from_lines(
                 content_bbox=segment.content_bbox,
             )
             for segment_idx, segment in enumerate(line.segments)
+        )
+        segments = tuple(
+            segment for segment in typed
             if segment.kind == ROUTE_SEGMENT_TEXT_LATIN
         )
         if segments:
@@ -459,6 +463,9 @@ def _engcut_masked_line_routes_from_lines(
                     line_idx=line_idx,
                     bbox=line.bbox,
                     segments=segments,
+                    excluded_segments=tuple(
+                        segment for segment in typed if segment not in segments
+                    ),
                     text_axis=line.text_axis,
                     orientation_angle=line.orientation_angle,
                     ppocr_symbol_observations=line.ppocr_symbol_observations,
@@ -2136,6 +2143,12 @@ def _materialize_engcut_masked_line_crop(
                 f"line={route.bbox} segment={segment.bbox}"
             )
         canvas[sy1 - y1:sy2 - y1, sx1 - x1:sx2 - x1] = image_bgr[sy1:sy2, sx1:sx2]
+    for segment in route.excluded_segments:
+        overlap = _intersect_xyxy(segment.bbox, (x1, y1, x2, y2))
+        if overlap is None:
+            continue
+        sx1, sy1, sx2, sy2 = overlap
+        canvas[sy1 - y1:sy2 - y1, sx1 - x1:sx2 - x1] = 255
     return canvas, x1, y1
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 import unicodedata
 
 import numpy as np
@@ -80,6 +81,15 @@ def detect_page_text_decorations(
             run = _dominant_aligned_run(components, line_height)
             if len(run) < _MIN_REPEATED_COMPONENTS:
                 continue
+            group_components = tuple(
+                component
+                for component in analyze_foreground_components(
+                    image_bgr,
+                    _union(tuple(source.bbox for source in group)),
+                ).components
+                if _is_small_repeated_mark(component, line_height)
+            )
+            run = _extend_regular_aligned_run(run, group_components, line_height)
             bbox = _union(tuple(component.bbox for component in run))
             if bbox[2] - bbox[0] < _MIN_LEADER_LINE_HEIGHTS * line_height:
                 continue
@@ -203,6 +213,59 @@ def _dominant_aligned_run(
     return tuple(max(groups, key=lambda group: (_span_width(group), len(group))))
 
 
+def _extend_regular_aligned_run(
+    run: tuple[ForegroundComponent, ...],
+    components: tuple[ForegroundComponent, ...],
+    line_height: int,
+) -> tuple[ForegroundComponent, ...]:
+    """Recover regular leader marks clipped by vendor token boundaries."""
+
+    ordered = sorted(run, key=lambda item: item.bbox[0])
+    if len(ordered) < _MIN_REPEATED_COMPONENTS:
+        return tuple(ordered)
+    centers = [_center_x(item.bbox) for item in ordered]
+    spacing = float(median(
+        right - left for left, right in zip(centers, centers[1:])
+    ))
+    if spacing <= 0:
+        return tuple(ordered)
+    median_width = float(median(item.bbox[2] - item.bbox[0] for item in ordered))
+    median_height = float(median(item.bbox[3] - item.bbox[1] for item in ordered))
+    center_y = sum(_center_y(item.bbox) for item in ordered) / len(ordered)
+    vertical_tolerance = max(2.0, line_height * 0.18)
+
+    def compatible(item: ForegroundComponent) -> bool:
+        width = item.bbox[2] - item.bbox[0]
+        height = item.bbox[3] - item.bbox[1]
+        return (
+            item not in ordered
+            and abs(_center_y(item.bbox) - center_y) <= vertical_tolerance
+            and median_width * 0.5 <= width <= median_width * 1.8
+            and median_height * 0.5 <= height <= median_height * 1.8
+        )
+
+    remaining = [item for item in components if compatible(item)]
+    minimum_gap = spacing * 0.45
+    maximum_gap = spacing * 1.6
+    for direction in (-1, 1):
+        while True:
+            boundary = _center_x(ordered[0 if direction < 0 else -1].bbox)
+            candidates = []
+            for item in remaining:
+                gap = (_center_x(item.bbox) - boundary) * direction
+                if minimum_gap <= gap <= maximum_gap:
+                    candidates.append((abs(gap - spacing), item))
+            if not candidates:
+                break
+            _distance, chosen = min(candidates, key=lambda pair: pair[0])
+            remaining.remove(chosen)
+            if direction < 0:
+                ordered.insert(0, chosen)
+            else:
+                ordered.append(chosen)
+    return tuple(ordered)
+
+
 def _span_width(components: list[ForegroundComponent]) -> int:
     return max(item.bbox[2] for item in components) - min(item.bbox[0] for item in components)
 
@@ -220,6 +283,10 @@ def _merge_overlapping(decorations: list[TextDecoration]) -> list[TextDecoration
 
 def _center_y(bbox: XYXY) -> float:
     return (bbox[1] + bbox[3]) / 2.0
+
+
+def _center_x(bbox: XYXY) -> float:
+    return (bbox[0] + bbox[2]) / 2.0
 
 
 def _intersect(left: XYXY, right: XYXY) -> XYXY | None:

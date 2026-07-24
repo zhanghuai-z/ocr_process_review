@@ -12,7 +12,7 @@
 - 本轮研究起始基线：`2620f29 fix: use routed foreground for degraded words`
 - 本轮研究开始时，该分支领先远端 45 个提交。
 - 工作区包含大量用户样例、实验脚本、未跟踪文件和已删除的旧报告。不要批量清理、恢复或提交它们。
-- 最近完整回归：`374 passed in 30.56s`（2026-07-24，WSL、`QT_QPA_PLATFORM=offscreen`）。
+- 最近完整回归：`376 passed in 23.73s`（2026-07-24，WSL、`QT_QPA_PLATFORM=offscreen`）。
 
 开始工作前执行：
 
@@ -75,6 +75,7 @@ python -m pytest -q
 
 - `LayoutSnapshot` 决定块类型和几何；PP-OCR 行/词框只是 OCR 几何观察。
 - 公式、表格、图片和装饰所有权先于文本分流；表格和图片不进入普通文本路由。
+- 已证明的目录长点线可按同基线、同尺寸和规则间距补齐紧邻但落在 PP token 边界外的点；远处标点不纳入。`decoration` 对 LineCut 和 EngCut 输入均有最终置白优先级，不能因与 Latin segment 重叠重新进入字符 observation。
 - 拉丁字母与数字进入 EngCut；剩余中文及其上下文符号进入 LineCut。
 - 混合行是物理行状态，不是一个 `text_mixed` 目标。它应在 CharOCR 前拆为有明确所有权的 segment。
 - 路由不完整或归属含糊时只阻断当前页，并保留可审计 issue；不得静默整行 fallback 或修改版面真值。单字符拉丁 token 的残缺墨迹仅在第二组件满足同字形几何约束且候选唯一时补全，否则以 `incomplete_single_latin_token_ink` 阻断当前页。CharOCR 几何可靠时，非空正文不得由 PP/VL 替换或重排，唯一几何绑定的文本分歧只保存为明确标源的候选；EngCut native group 内字符 bbox 重叠时，字符几何与文本同时降级，仅允许恰有一个 PP word token 且已有唯一前景所有权 route bbox 的 segment 聚合自身连续 native groups，并以 PP 文本和 route 前景闭合 bbox 生成一次明确标源的 word atom。PP 原始 word bbox 仍是只读 observation；无唯一 token、无前景闭合几何或 groups 穿插则阻断。若一个完整组件 PP 独立标点 observation 唯一归属一条物理行、且与任何 native atom 均不相交，可按几何顺序创建明确标源的缺失符号 atom。候选绑定、缺失 atom 插入和未绑定使用不同运行计数；插入 atom 的来源与 bbox 进入 OCR observation，执行期行 review flag 当前不写入 `OcrLine`。EngCut 对已有拉丁 route 完全无输出时仍保留显式 PP word fallback。
@@ -136,7 +137,7 @@ CJK 字框清理 JSON、`族` 对照、空谷候选和边界风险回显位于 `
 - 每个实例通过稳定 UID、page、line/text unit、bbox 和 crop 元数据引用上下文，不持有独立文本副本。
 - OCR 文本上下文按整页呈现并高亮当前字符或词；原稿图同样由 page+bbox 定位。word occurrence 替换其显式 `[char_index, char_end)` 范围。
 - 修改最终提交到共享 `ProofTextUnit`，横校和纵校随后读取同一新工作区。
-- 纵校 crop padding 按字形短边计算：ASCII 字母/数字 1 px、ASCII 标点 2 px、其他字符 10% 且封顶 6 px；padding 只扩展示图裁片，不改变 OCR atom bbox。
+- 纵校 CJK crop 不扩边；ASCII 字母/数字 padding 为 1 px、ASCII 标点为 2 px，其他非 CJK 内容按短边 10% 且封顶 6 px。padding 只扩展示图裁片，不改变 OCR atom bbox。
 
 ### 页面显示方向
 

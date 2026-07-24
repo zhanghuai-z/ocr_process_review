@@ -62,6 +62,30 @@ def test_routing_plan_exposes_lines_segments_and_text_slices():
     assert all(len(route.bbox) == 4 for route in plan.text_slices)
 
 
+def test_engcut_canvas_applies_decoration_exclusion_after_latin_pixels() -> None:
+    from app.engines.hanwang import micro_recblock as micro_module
+
+    image = np.full((40, 100, 3), 255, dtype=np.uint8)
+    image[5:35, 10:90] = 0
+    line = RoutingLine(
+        index=0,
+        bbox=(5, 3, 95, 37),
+        segments=(
+            RoutingSegment(kind="text_latin", bbox=(10, 5, 90, 35)),
+            RoutingSegment(kind="decoration", bbox=(40, 18, 70, 22)),
+        ),
+    )
+
+    route = micro_module._engcut_masked_line_routes_from_lines(0, (line,))[0]
+    crop, offset_x, offset_y = micro_module._materialize_engcut_masked_line_crop(
+        image,
+        route,
+    )
+
+    assert np.all(crop[10 - offset_y, 20 - offset_x] == 0)
+    assert np.all(crop[20 - offset_y, 50 - offset_x] == 255)
+
+
 def test_page_routing_plan_freezes_nested_route_collections():
     line = RoutingLine(
         index=0,

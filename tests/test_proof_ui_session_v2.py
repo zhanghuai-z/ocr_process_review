@@ -1275,9 +1275,9 @@ def test_vproof_gallery_crop_padding_is_bounded_for_tall_and_word_boxes() -> Non
         )
 
     assert _gallery_crop_pad(entry("A", (10, 10, 18, 60))) == 1
-    assert _gallery_crop_pad(entry("中", (10, 10, 50, 60))) == 4
+    assert _gallery_crop_pad(entry("中", (10, 10, 50, 60))) == 0
     assert _gallery_crop_pad(entry("Finance", (10, 10, 210, 60))) == 5
-    assert _gallery_crop_pad(entry("长文本", (10, 10, 410, 110))) == 6
+    assert _gallery_crop_pad(entry("长文本", (10, 10, 410, 110))) == 0
 
 
 def test_char_views_keep_one_word_bbox_as_one_range_occurrence(

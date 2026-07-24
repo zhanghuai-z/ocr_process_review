@@ -109,20 +109,25 @@ def _entry_key(entry: ProofCharView) -> tuple[str, str, int, int, str | None]:
 def _char_index_group(text: str) -> int:
     """Order character buckets as CJK, letters, digits, then punctuation."""
 
-    if len(text) == 1:
-        codepoint = ord(text)
-        if (
-            0x3400 <= codepoint <= 0x4DBF
-            or 0x4E00 <= codepoint <= 0x9FFF
-            or 0xF900 <= codepoint <= 0xFAFF
-            or 0x20000 <= codepoint <= 0x323AF
-        ):
-            return 0
+    if len(text) == 1 and _is_cjk_char(text):
+        return 0
     if text.isalpha():
         return 1
     if text.isdigit():
         return 2
     return 3
+
+
+def _is_cjk_char(char: str) -> bool:
+    if len(char) != 1:
+        return False
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x323AF
+    )
 
 
 def _gallery_crop_pad(entry: ProofCharView) -> int:
@@ -132,6 +137,9 @@ def _gallery_crop_pad(entry: ProofCharView) -> int:
         return 0
     left, top, right, bottom = entry.bbox
     text = entry.text or ""
+    visible = tuple(char for char in text if not char.isspace())
+    if visible and all(_is_cjk_char(char) for char in visible):
+        return 0
     if len(text) == 1 and text.isascii() and not text.isspace():
         return 1 if text.isalnum() else 2
     shortest_edge = max(1, min(right - left, bottom - top))
