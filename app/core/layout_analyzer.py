@@ -10,6 +10,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.adapters.paddle.inline_formula_observations import (
+    PaddleInlineFormulaObservationError,
+    inline_formula_detector_observations,
+)
 from app.core.paddle_labels import normalize_paddle_label
 from app.models.entity_id import new_entity_uid
 from app.models.enums import BlockSource, BlockType, OcrPolicy
@@ -354,6 +358,45 @@ class LayoutAnalyzer:
                     )
                 )
 
+        try:
+            inline_formulas = inline_formula_detector_observations(
+                response,
+                page_width=width,
+                page_height=height,
+            )
+        except PaddleInlineFormulaObservationError as exc:
+            raise LayoutAnalysisError(str(exc)) from exc
+        equation_blocks = [
+            block for block in blocks if block.block_type is BlockType.EQUATION
+        ]
+        for observation in inline_formulas:
+            if any(_bbox_contains(block.bbox, observation.bbox) for block in equation_blocks):
+                continue
+            origin = BlockOrigin(
+                created_by=BlockSource.AUTO_LAYOUT.value,
+                source_engine=source_engine,
+                source_run_id=source_run_id,
+                vendor_label="inline_formula",
+                source_confidence=observation.score,
+                original_bbox=observation.bbox,
+                original_kind=BlockType.EQUATION,
+                raw_artifact_uid=artifact_uid,
+                raw_json_path=observation.raw_json_path,
+                raw_index=None,
+            )
+            block = LayoutBlockSnapshot(
+                block_type=BlockType.EQUATION,
+                bbox=observation.bbox,
+                order=len(blocks),
+                source_label="inline_formula",
+                origin=origin,
+                ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                authorship=BlockSource.AUTO_LAYOUT,
+                uid=new_entity_uid("block"),
+            )
+            blocks.append(block)
+            equation_blocks.append(block)
+
         return LayoutSnapshot(
             page_uid=page_uid,
             revision=revision,
@@ -362,6 +405,15 @@ class LayoutAnalyzer:
             source_run_id=source_run_id,
             blocks=tuple(blocks),
         )
+
+
+def _bbox_contains(outer: BBox, inner: BBox) -> bool:
+    return (
+        outer.x1 <= inner.x1
+        and outer.y1 <= inner.y1
+        and outer.x2 >= inner.x2
+        and outer.y2 >= inner.y2
+    )
 
 
 __all__ = ["LayoutAnalysisError", "LayoutAnalyzer"]

@@ -33,6 +33,9 @@ from app.models.proof_records import (
 )
 from app.models.project_session import BindingRecord, PageRecord, ProjectSession, RecordNotFoundError
 from app.services.charocr_input_service import compile_charocr_page_request
+from app.services.inline_formula_layout_guard import (
+    require_current_automatic_inline_formula_layout,
+)
 from app.services.ocr_routing_observation_service import acquire_routing_observation_bundle
 
 
@@ -147,6 +150,12 @@ class OcrJobService:
         if not layout.artifact_uid:
             raise RuntimeError("OCR requires an adopted Paddle layout artifact")
         artifact = session.paddle_artifact_repository.get(layout.artifact_uid)
+        require_current_automatic_inline_formula_layout(
+            layout,
+            artifact,
+            page_width=page.width,
+            page_height=page.height,
+        )
         if image_bgr is None:
             image_path = Path(page.cache_image_path or page.image_path)
             if not image_path.is_file():

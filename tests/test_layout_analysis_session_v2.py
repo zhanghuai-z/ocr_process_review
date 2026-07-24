@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from app.core.layout_analyzer import LayoutAnalysisError
-from app.models.enums import BlockSource
+from app.adapters.paddle.inline_formula_observations import (
+    inline_formula_detector_observations,
+)
+from app.core.layout_analyzer import LayoutAnalysisError, LayoutAnalyzer
+from app.models.enums import BlockSource, BlockType, OcrPolicy
 from app.models.geometry import BBox
 from app.models.layout_origin import BlockOrigin
 from app.models.layout_snapshot import LayoutBlockSnapshot
@@ -137,6 +140,63 @@ def test_layout_analysis_is_page_scoped_and_keeps_raw_vendor_json_append_only(tm
 
     assert fake.calls[0][2] == "page-1"
     assert fake.calls[1][2] == "page-2"
+
+
+def test_real_paddle_inline_formula_detectors_enter_the_same_layout_snapshot() -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/layout/120166-layout-api-fixture.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    response = fixture["response"]
+
+    observations = inline_formula_detector_observations(
+        response,
+        page_width=2356,
+        page_height=3424,
+    )
+    assert len(observations) == 7
+    assert observations[0].bbox == BBox.from_xyxy(1466, 1818, 1518, 1869)
+    assert observations[0].raw_json_path.endswith("layout_det_res.boxes[10]")
+    assert observations[0].parent_raw_index == 9
+    assert observations[0].exact_parent_text == ""
+
+    snapshot = LayoutAnalyzer().analyze(
+        response,
+        page_uid="page-real",
+        page_width=2356,
+        page_height=3424,
+        artifact_uid="artifact-real",
+        source_run_id="layout-real",
+    )
+    inline_blocks = [
+        block for block in snapshot.blocks if block.source_label == "inline_formula"
+    ]
+    assert len(inline_blocks) == 7
+    assert all(block.block_type is BlockType.EQUATION for block in inline_blocks)
+    assert all(block.ocr_policy is OcrPolicy.PRESERVE_AS_FORMULA for block in inline_blocks)
+    assert all(block.origin.raw_index is None for block in inline_blocks)
+    assert inline_blocks[0].origin.raw_json_path.endswith("layout_det_res.boxes[10]")
+
+
+def test_inline_formula_parent_text_requires_an_exact_per_parent_count() -> None:
+    response = _response()
+    pruned = response["result"]["layoutParsingResults"][0]["prunedResult"]
+    pruned["parsing_res_list"][0]["block_content"] = "left $x$ middle $y$ right"
+    pruned["layout_det_res"] = {
+        "boxes": [
+            {"label": "inline_formula", "coordinate": [20, 30, 30, 50]},
+            {"label": "inline_formula", "coordinate": [50, 30, 60, 50]},
+        ]
+    }
+
+    observations = inline_formula_detector_observations(
+        response,
+        page_width=200,
+        page_height=300,
+    )
+
+    assert [item.exact_parent_text for item in observations] == ["$x$", "$y$"]
 
 
 def test_error_response_does_not_partially_persist_vendor_fact(tmp_path: Path):

@@ -35,7 +35,13 @@ from app.models.proof_records import ProofAnchorSnapshot, ProofState, ProofTextU
 from app.services.ocr_job_service import OcrJobService, OcrPageJobFailure
 
 
-def _session(*, with_proof: bool = True) -> ProjectSession:
+def _session(
+    *,
+    with_proof: bool = True,
+    artifact_payload: dict | None = None,
+    layout_authorship: BlockSource = BlockSource.MANUAL_DRAW,
+    layout_source_engine: str = "paddle-vl",
+) -> ProjectSession:
     session = ProjectSession(ProjectRecord("project-1", "Book"))
     page = PageRecord(
         project_uid="project-1", uid="page-1", image_path="page.png",
@@ -47,18 +53,20 @@ def _session(*, with_proof: bool = True) -> ProjectSession:
     artifact = PaddleArtifact(
         project_uid="project-1", uid="artifact-1", page_uid="page-1",
         source_engine="paddle-vl", source_run_id="layout-run", image_hash="hash",
-        payload_json=json.dumps({"result": {"layoutParsingResults": []}}),
+        payload_json=json.dumps(
+            artifact_payload or {"result": {"layoutParsingResults": []}}
+        ),
     )
     session.paddle_artifact_repository.append(artifact)
     layout = LayoutSnapshot(
         page_uid="page-1", revision=1, artifact_uid="artifact-1",
-        source_engine="paddle-vl", source_run_id="layout-run",
+        source_engine=layout_source_engine, source_run_id="layout-run",
         blocks=(LayoutBlockSnapshot(
             uid="block-1", block_type=BlockType.TEXT, bbox=BBox(1, 2, 40, 20),
             order=0, source_label="text",
-            origin=BlockOrigin(created_by=BlockSource.MANUAL_DRAW.value),
+            origin=BlockOrigin(created_by=layout_authorship.value),
             ocr_policy=OcrPolicy.TEXT_OCR,
-            authorship=BlockSource.MANUAL_DRAW,
+            authorship=layout_authorship,
         ),),
     )
     session.layout_repository.put(layout, expected_revision=0)
@@ -76,6 +84,31 @@ def _session(*, with_proof: bool = True) -> ProjectSession:
             ),),
         ))
     return session
+
+
+def _inline_formula_payload() -> dict:
+    return {
+        "result": {
+            "layoutParsingResults": [{
+                "prunedResult": {
+                    "width": 100,
+                    "height": 80,
+                    "parsing_res_list": [{
+                        "block_label": "text",
+                        "block_bbox": [1, 2, 90, 30],
+                        "block_content": "left $x$ right",
+                    }],
+                    "layout_det_res": {
+                        "boxes": [{
+                            "label": "inline_formula",
+                            "coordinate": [45, 5, 55, 20],
+                            "score": 0.9,
+                        }]
+                    },
+                }
+            }]
+        }
+    }
 
 
 class _Prepass:
@@ -126,6 +159,69 @@ class _Engine:
                 ),),
             ),),
         )
+
+
+def test_prepare_page_blocks_old_automatic_layout_missing_inline_formula() -> None:
+    session = _session(
+        artifact_payload=_inline_formula_payload(),
+        layout_authorship=BlockSource.AUTO_LAYOUT,
+    )
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+
+    with pytest.raises(RuntimeError, match="重新运行该页版面分析"):
+        service.prepare_page(
+            session,
+            "page-1",
+            image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+        )
+
+
+def test_prepare_page_does_not_restore_formula_deleted_from_edited_layout() -> None:
+    session = _session(
+        artifact_payload=_inline_formula_payload(),
+        layout_authorship=BlockSource.AUTO_LAYOUT,
+        layout_source_engine="layout_edit",
+    )
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+
+    request = service.prepare_page(
+        session,
+        "page-1",
+        image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+    )
+
+    assert request.layout.source_engine == "layout_edit"
+
+
+def test_prepare_page_accepts_automatic_layout_with_formula_geometry() -> None:
+    session = _session(
+        artifact_payload=_inline_formula_payload(),
+        layout_authorship=BlockSource.AUTO_LAYOUT,
+    )
+    layout = session.layout_repository.get("page-1")
+    formula = LayoutBlockSnapshot(
+        uid="block-formula",
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(45, 5, 55, 20),
+        order=1,
+        source_label="inline_formula",
+        origin=BlockOrigin(created_by=BlockSource.AUTO_LAYOUT.value),
+        ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        authorship=BlockSource.AUTO_LAYOUT,
+    )
+    session.layout_repository.put(
+        replace(layout, revision=2, blocks=(*layout.blocks, formula)),
+        expected_revision=1,
+    )
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+
+    request = service.prepare_page(
+        session,
+        "page-1",
+        image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+    )
+
+    assert request.layout.blocks[-1].uid == "block-formula"
 
 
 def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch) -> None:
