@@ -50,6 +50,219 @@ def _v3_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _token_key(record: dict[str, Any]) -> tuple[str, str, tuple[int, ...]]:
+    return (
+        str(record["source_image"]),
+        str(record["text"]),
+        tuple(int(item) for item in record["route_bbox"]),
+    )
+
+
+def _audit_token_index(payload: dict[str, Any]) -> dict[tuple[str, str, tuple[int, ...]], dict[str, Any]]:
+    pages = [
+        page
+        for page in payload.get("project_pages") or []
+        if int(page.get("run_index") or 0) == 1
+    ] + list(payload.get("batch_pages") or [])
+    index: dict[tuple[str, str, tuple[int, ...]], dict[str, Any]] = {}
+    for page in pages:
+        if page.get("status") != "ok":
+            continue
+        for token in page.get("tokens") or []:
+            if not token.get("route_bbox"):
+                continue
+            record = {**token, "source_image": page["source_image"]}
+            index.setdefault(_token_key(record), token)
+    return index
+
+
+def _strict_intersects(left: list[int], right: list[int]) -> bool:
+    return bool(
+        max(left[0], right[0]) < min(left[2], right[2])
+        and max(left[1], right[1]) < min(left[3], right[3])
+    )
+
+
+def _production_word_quality(
+    record: dict[str, Any],
+    token: dict[str, Any],
+) -> dict[str, Any]:
+    atoms = list((token.get("current_result") or {}).get("atoms") or [])
+    word_atoms = [atom for atom in atoms if atom.get("granularity") == "word"]
+    if len(word_atoms) != 1 or not word_atoms[0].get("bbox"):
+        raise RuntimeError(
+            f"expected one persisted diagnostic word atom: {record['source_name']} {record['text']!r}"
+        )
+    word = word_atoms[0]
+    word_bbox = [int(item) for item in word["bbox"]]
+    other_boxes = [
+        [int(item) for item in atom["bbox"]]
+        for atom in atoms
+        if atom is not word and atom.get("bbox") is not None
+    ]
+    components = list(record.get("owned_components") or [])
+    outside_components = sum(
+        not (
+            word_bbox[0] <= int(component["bbox"][0])
+            and word_bbox[1] <= int(component["bbox"][1])
+            and word_bbox[2] >= int(component["bbox"][2])
+            and word_bbox[3] >= int(component["bbox"][3])
+        )
+        for component in components
+    )
+    return {
+        "word_atom": word,
+        "all_atoms": atoms,
+        "word_equals_route": word_bbox == [int(item) for item in record["route_bbox"]],
+        "other_atom_overlap_count": sum(
+            _strict_intersects(word_bbox, box) for box in other_boxes
+        ),
+        "owned_component_outside_count": outside_components,
+    }
+
+
+def _read_image(path: str) -> np.ndarray:
+    image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"cannot read source image: {path}")
+    return image
+
+
+def _draw_bbox(
+    image: np.ndarray,
+    bbox: list[int],
+    crop_bbox: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    thickness: int,
+) -> None:
+    x1, y1, x2, y2 = bbox
+    cx1, cy1, _cx2, _cy2 = crop_bbox
+    cv2.rectangle(
+        image,
+        (x1 - cx1, y1 - cy1),
+        (x2 - cx1 - 1, y2 - cy1 - 1),
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
+    quality = record["production_word_quality"]
+    image = _read_image(record["source_image"])
+    boxes = [
+        [int(item) for item in record["route_bbox"]],
+        [int(item) for item in record["pp_bbox"]],
+        *[
+            [int(item) for item in atom["bbox"]]
+            for atom in quality["all_atoms"]
+            if atom.get("bbox") is not None
+        ],
+    ]
+    height, width = image.shape[:2]
+    crop_bbox = (
+        max(0, min(box[0] for box in boxes) - 16),
+        max(0, min(box[1] for box in boxes) - 10),
+        min(width, max(box[2] for box in boxes) + 16),
+        min(height, max(box[3] for box in boxes) + 10),
+    )
+    x1, y1, x2, y2 = crop_bbox
+    raw = image[y1:y2, x1:x2].copy()
+    native = raw.copy()
+    final = raw.copy()
+    for char in record.get("native_chars") or []:
+        if char.get("bbox") is not None:
+            _draw_bbox(native, char["bbox"], crop_bbox, (0, 0, 220), 1)
+    _draw_bbox(native, record["pp_bbox"], crop_bbox, (220, 80, 0), 1)
+    _draw_bbox(final, record["pp_bbox"], crop_bbox, (220, 80, 0), 1)
+    for atom in quality["all_atoms"]:
+        if atom.get("bbox") is None:
+            continue
+        if atom.get("granularity") == "word":
+            _draw_bbox(final, atom["bbox"], crop_bbox, (0, 170, 0), 3)
+        else:
+            _draw_bbox(final, atom["bbox"], crop_bbox, (0, 140, 255), 2)
+
+    scale = min(2.4, 480 / max(1, raw.shape[1]))
+    panels: list[np.ndarray] = []
+    for label, panel in (
+        ("RAW CONTEXT", raw),
+        ("NATIVE: RED CHAR / BLUE PP", native),
+        ("FINAL: GREEN WORD / ORANGE OTHER / BLUE PP", final),
+    ):
+        panel = cv2.resize(
+            panel, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST
+        )
+        label_band = np.full((28, panel.shape[1], 3), 255, np.uint8)
+        cv2.putText(
+            label_band,
+            label,
+            (5, 19),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (30, 30, 30),
+            1,
+            cv2.LINE_AA,
+        )
+        panels.append(np.vstack((label_band, panel)))
+    panel_height = max(panel.shape[0] for panel in panels)
+    normalized: list[np.ndarray] = []
+    for panel in panels:
+        canvas = np.full((panel_height, panel.shape[1], 3), 255, np.uint8)
+        canvas[:panel.shape[0]] = panel
+        normalized.append(canvas)
+    body = np.hstack(normalized)
+    header = np.full((70, body.shape[1], 3), 255, np.uint8)
+    word = quality["word_atom"]
+    cv2.putText(
+        header,
+        f"{record['source_name']} | PP={record['text']} | FINAL WORD={word['text']} | source={word['source']}",
+        (6, 23),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.43,
+        (20, 20, 20),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        header,
+        f"pp={record['pp_bbox']} word={word['bbox']} route_equal={quality['word_equals_route']} other_overlap={quality['other_atom_overlap_count']} owned_outside={quality['owned_component_outside_count']}",
+        (6, 50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        (55, 55, 55),
+        1,
+        cv2.LINE_AA,
+    )
+    return np.vstack((header, body))
+
+
+def _word_quality_sheets(
+    records: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    page_size: int = 9,
+) -> list[str]:
+    names: list[str] = []
+    for start in range(0, len(records), page_size):
+        rows = [_render_word_quality_row(record) for record in records[start:start + page_size]]
+        width = max(row.shape[1] for row in rows)
+        parts = [_section_header(
+            f"PRODUCTION WORD FALLBACK QUALITY {start + 1}-{start + len(rows)} / {len(records)}",
+            "Green is the final production word atom. Blue is raw PP bbox. Orange is any other final atom; inspect ink containment and overlap.",
+            width,
+        )]
+        for row in rows:
+            canvas = np.full((row.shape[0], width, 3), 255, np.uint8)
+            canvas[:, :row.shape[1]] = row
+            parts.append(canvas)
+            parts.append(np.full((10, width, 3), 242, np.uint8))
+        name = f"04_word_fallback_quality_{start // page_size + 1:02d}.png"
+        cv2.imencode(".png", np.vstack(parts))[1].tofile(output_dir / name)
+        names.append(name)
+    return names
+
+
 def _section_header(title: str, detail: str, width: int) -> np.ndarray:
     canvas = np.full((74, width, 3), 255, np.uint8)
     cv2.putText(
@@ -98,7 +311,11 @@ def _stack_sections(
     cv2.imencode(".png", np.vstack(parts))[1].tofile(output)
 
 
-def _write_index(output_dir: Path, stats: dict[str, int]) -> None:
+def _write_index(
+    output_dir: Path,
+    stats: dict[str, int],
+    word_quality_sheets: list[str],
+) -> None:
     cards = [
         (
             "01_v2_boundary_cut_saturation.png",
@@ -126,6 +343,10 @@ def _write_index(output_dir: Path, stats: dict[str, int]) -> None:
         """
         for name, title, detail in cards
     )
+    word_quality_body = "\n".join(
+        f'<a href="{html.escape(name)}"><img src="{html.escape(name)}" alt="Production word fallback quality page"></a>'
+        for name in word_quality_sheets
+    )
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -147,6 +368,11 @@ def _write_index(output_dir: Path, stats: dict[str, int]) -> None:
   <h1>Latin fragment metric failure evidence</h1>
   <p class="summary">Diagnostic projection only. Source: latin_charbox_fragment_quality.v3. Known bad: {stats['targets']}; usable controls: {stats['controls']}; v3 reference candidates: {stats['candidates']}; known bad selected by v3: 0.</p>
   {body}
+  <section>
+    <h2>Final production word-box quality</h2>
+    <p>All {stats['fallback_candidates']} current fallback candidates are shown. Green is the final word atom, blue is the raw PP bbox, and orange marks any other final atom. Word equals route: {stats['word_equals_route']}; overlaps another final atom: {stats['word_overlaps_other']}.</p>
+    {word_quality_body}
+  </section>
 </main></body>
 </html>
 """
@@ -163,6 +389,11 @@ def _windows_path(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--audit-input",
+        type=Path,
+        default=ROOT / "debug/italic_token_fallback_study_20260723/report.json",
+    )
+    parser.add_argument(
         "--input",
         type=Path,
         default=ROOT / "debug/latin_charbox_fragment_quality_20260724/report.json",
@@ -174,9 +405,24 @@ def main() -> int:
     )
     args = parser.parse_args()
     payload = json.loads(args.input.read_text(encoding="utf-8"))
+    audit_payload = json.loads(args.audit_input.read_text(encoding="utf-8"))
     records = list(payload.get("records") or [])
     targets, controls = _known_cohorts(records)
     candidates = _v3_candidates(records)
+    audit_index = _audit_token_index(audit_payload)
+    fallback_candidates: list[dict[str, Any]] = []
+    for record in candidates:
+        if not record.get("current_word_fallback"):
+            continue
+        token = audit_index.get(_token_key(record))
+        if token is None:
+            raise RuntimeError(
+                f"audit token missing: {record['source_name']} {record['text']!r}"
+            )
+        fallback_candidates.append({
+            **record,
+            "production_word_quality": _production_word_quality(record, token),
+        })
     if len(targets) != 4 or len(controls) != 3:
         raise RuntimeError(
             f"expected known cohort 4 targets / 3 controls, got {len(targets)} / {len(controls)}"
@@ -218,16 +464,26 @@ def main() -> int:
         ],
         output_dir / "03_v3_selected_examples.png",
     )
+    word_sheets = _word_quality_sheets(fallback_candidates, output_dir)
     stats = {
         "targets": len(targets),
         "controls": len(controls),
         "candidates": len(candidates),
+        "fallback_candidates": len(fallback_candidates),
+        "word_equals_route": sum(
+            record["production_word_quality"]["word_equals_route"]
+            for record in fallback_candidates
+        ),
+        "word_overlaps_other": sum(
+            bool(record["production_word_quality"]["other_atom_overlap_count"])
+            for record in fallback_candidates
+        ),
     }
-    _write_index(output_dir, stats)
+    _write_index(output_dir, stats, word_sheets)
     (output_dir / "summary.json").write_text(
         json.dumps(
             {
-                "schema": "latin_fragment_metric_failure_evidence.v1",
+                "schema": "latin_fragment_metric_failure_evidence.v2",
                 "source_schema": payload.get("schema"),
                 **stats,
                 "known_target_v2_cut_ratios": [
@@ -243,6 +499,7 @@ def main() -> int:
                     record.get("known_label") == "target_bad_geometry"
                     for record in candidates
                 ),
+                "word_quality_sheets": word_sheets,
             },
             ensure_ascii=False,
             indent=2,

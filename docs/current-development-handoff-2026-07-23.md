@@ -104,7 +104,7 @@ python -m pytest -q
 
 字符框碎片质量 JSON、目标/对照热图、候选回显和 `T00031` 的 PP/route/native 专项图位于 `D:\project\ocr_process\worktrees\coord\debug\latin_charbox_fragment_quality_20260724`，只属于诊断证据；报告 schema v3 明确废弃 v1/v2 的候选解释。
 
-碎片指标失效原因的专门回显入口位于 `D:\project\ocr_process\worktrees\coord\debug\latin_fragment_metric_failure_evidence_20260724\index.html`：第一组对照 v2 在已知坏框和正常框上同时饱和，第二组展示 v3 漏掉全部 4 个已知坏框，第三组展示 v3 实际主要命中已有 fallback 的严重样本。该入口由 `scripts/render_latin_fragment_metric_failure_evidence.py` 从现有 v3 JSON 只读生成。
+碎片指标失效原因的专门回显入口位于 `D:\project\ocr_process\worktrees\coord\debug\latin_fragment_metric_failure_evidence_20260724\index.html`：第一组对照 v2 在已知坏框和正常框上同时饱和，第二组展示 v3 漏掉全部 4 个已知坏框，第三组展示 v3 实际主要命中已有 fallback 的严重样本；末尾 5 页覆盖全部 43 个既有 word fallback，三栏分别显示原图上下文、红色 EngCut 字符框/蓝色 PP 原框、绿色最终 word atom/橙色其他最终 atom。43 个最终 word bbox 全部等于 route 前景框，1 个 `120192.tif / pj` 与仍保留的 `o` char atom 相交；是否吞入未成 atom 的邻接墨迹仍由上下文图人工核查。该入口由 `scripts/render_latin_fragment_metric_failure_evidence.py` 从现有 v3 JSON 和不可变 fallback 审计 JSON 只读生成。
 
 EngCut 四档去斜曲线位于 `D:\project\ocr_process\worktrees\coord\debug\latin_engcut_deslant_counterfactual_test3_20260724`，全批次 `0.25` 倍轻扰动目标/对照报告位于 `D:\project\ocr_process\worktrees\coord\debug\latin_engcut_light_shear_batch_20260724`；两者都是诊断产物，不是字体、文本或 bbox 权威事实。
 
