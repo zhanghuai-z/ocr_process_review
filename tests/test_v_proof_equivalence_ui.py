@@ -207,6 +207,35 @@ def test_vproof_uses_character_crops_and_highlights_one_ocr_occurrence(
     panel.close()
 
 
+def test_vproof_rotates_crops_viewer_geometry_and_reverse_clicks(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.v_proof import VProofPanel, _page_pixmap
+
+    workspace = _workspace(tmp_path)
+    rotated_page = replace(
+        workspace.pages[0],
+        display_rotation_quarters_clockwise=1,
+    )
+    workspace = replace(workspace, pages=(rotated_page,))
+    panel = VProofPanel(workspace)
+    panel.show()
+    qapp.processEvents()
+
+    crop = _page_pixmap(rotated_page, (10, 10, 50, 30), QSize(200, 200))
+    assert crop.size() == QSize(100, 200)
+    page_pixmap = panel._page_source_pixmap(rotated_page)
+    assert page_pixmap.size() == QSize(60, 100)
+
+    # Source point (20, 20) appears at display point (40, 20) after one
+    # clockwise turn; reverse location must still select its source line.
+    assert panel._on_image_point_clicked(40, 20) is True
+    assert panel._selected_entry is not None
+    assert panel._selected_entry.text_unit_uid == "unit-1"
+    panel.close()
+
+
 def test_vproof_character_index_orders_cjk_letters_digits_then_punctuation() -> None:
     from app.ui.proof.v_proof import _char_index_group
 

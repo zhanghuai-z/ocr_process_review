@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 
 from app.core.char_index import CharIndexEntry
 from app.core.ocr_currentness import CurrentOcrObservation, current_ocr_observation
+from app.core.ocr_display_orientation import display_rotation_from_metadata
 from app.core.paddle_labels import normalize_paddle_label
 from app.models.ocr_records import OcrAtom, OcrBatch, OcrLine, OcrRegion
 from app.models.proof_records import ProofState, ProofTextUnit
@@ -69,6 +70,7 @@ class ProofPageView:
     image_hash: str
     image_revision: int
     page_fingerprint: str
+    display_rotation_quarters_clockwise: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,7 +423,7 @@ def _require_session(session: ProjectSession) -> ProjectSession:
     return session
 
 
-def _page_view(page: PageRecord) -> ProofPageView:
+def _page_view(page: PageRecord, *, display_rotation: int = 0) -> ProofPageView:
     return ProofPageView(
         project_uid=page.project_uid,
         page_uid=page.uid,
@@ -438,6 +440,7 @@ def _page_view(page: PageRecord) -> ProofPageView:
         image_hash=page.image_hash,
         image_revision=page.image_revision,
         page_fingerprint=page.fingerprint,
+        display_rotation_quarters_clockwise=display_rotation,
     )
 
 
@@ -982,7 +985,17 @@ def build_proof_workspace_view(
     )
     return ProofWorkspaceView(
         project_uid=session.project_uid,
-        pages=tuple(_page_view(page) for page in pages),
+        pages=tuple(
+            _page_view(
+                page,
+                display_rotation=(
+                    display_rotation_from_metadata(observation.run.metadata)
+                    if (observation := current_ocr_observation(session, page.uid)) is not None
+                    else 0
+                ),
+            )
+            for page in pages
+        ),
         proof_states=state_views,
         lines=lines,
         formula_number_links=formula_number_links,

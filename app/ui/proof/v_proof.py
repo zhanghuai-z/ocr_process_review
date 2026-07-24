@@ -66,6 +66,13 @@ from app.application.proof_workspace import (
 )
 from app.ui.proof.char_verdict import COLOR_ERROR, COLOR_LIKELY_OK
 from app.ui.proof.confidence_view import ProofCharView, build_char_views
+from app.ui.image_orientation import (
+    rotate_bbox,
+    rotate_image,
+    rotate_pixmap,
+    rotated_size,
+    source_point_from_display,
+)
 from app.ui.widgets.effects import apply_soft_shadow
 from app.ui.widgets.image_viewer import ImageViewer
 
@@ -174,6 +181,7 @@ def _page_pixmap(
     image = reader.read()
     if image.isNull():
         return QPixmap()
+    image = rotate_image(image, page.display_rotation_quarters_clockwise)
     target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
     return QPixmap.fromImage(image).scaled(
         max(1, target.width()),
@@ -211,7 +219,11 @@ def _crop_page_pixmap(
     if crop_rect.isEmpty():
         return QPixmap()
     target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
-    return page_pixmap.copy(crop_rect).scaled(
+    crop = rotate_pixmap(
+        page_pixmap.copy(crop_rect),
+        page.display_rotation_quarters_clockwise,
+    )
+    return crop.scaled(
         max(1, target.width()),
         max(1, target.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
@@ -244,7 +256,11 @@ def _crop_page_image(
     ).intersected(page_image.rect())
     if source_rect.isEmpty():
         return QPixmap()
-    return QPixmap.fromImage(page_image.copy(source_rect)).scaled(
+    crop = rotate_image(
+        page_image.copy(source_rect),
+        page.display_rotation_quarters_clockwise,
+    )
+    return QPixmap.fromImage(crop).scaled(
         max(1, target_size.width()),
         max(1, target_size.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
@@ -353,7 +369,7 @@ class VProofPanel(QWidget):
         self._selected_tokens: list[str] = []
         self._selected_entry: ProofCharView | None = None
         self._page_pixmaps: dict[str, QPixmap] = {}
-        self._page_pixmap_keys: dict[str, tuple[str, int]] = {}
+        self._page_pixmap_keys: dict[str, tuple[str, int, int]] = {}
         self._icon_cache: OrderedDict[tuple[object, ...], QIcon] = OrderedDict()
         self._viewer_page_uid: str | None = None
         self._candidate_buttons: list[QPushButton] = []
@@ -695,7 +711,11 @@ class VProofPanel(QWidget):
         """Drop cached page pixmaps whose page vanished or whose image changed."""
 
         valid = {
-            page.page_uid: (page.image_path, page.image_revision)
+            page.page_uid: (
+                page.image_path,
+                page.image_revision,
+                page.display_rotation_quarters_clockwise,
+            )
             for page in self._pages.values()
         }
         for page_uid in list(self._page_pixmaps):
@@ -966,6 +986,7 @@ class VProofPanel(QWidget):
             page.page_uid,
             page.image_path,
             page.image_revision,
+            page.display_rotation_quarters_clockwise,
             entry.bbox,
             pad,
             self._gallery.iconSize().width(),
@@ -1005,7 +1026,11 @@ class VProofPanel(QWidget):
 
     def _remember_page_pixmap(self, page: ProofPageView, pixmap: QPixmap) -> None:
         self._page_pixmaps[page.page_uid] = pixmap
-        self._page_pixmap_keys[page.page_uid] = (page.image_path, page.image_revision)
+        self._page_pixmap_keys[page.page_uid] = (
+            page.image_path,
+            page.image_revision,
+            page.display_rotation_quarters_clockwise,
+        )
 
     def _page_source_pixmap(self, page: ProofPageView) -> QPixmap:
         cached = self._page_pixmaps.get(page.page_uid)
@@ -1019,6 +1044,7 @@ class VProofPanel(QWidget):
                 QSize(2000, round(source_size.height() * 2000 / source_size.width()))
             )
         image = reader.read()
+        image = rotate_image(image, page.display_rotation_quarters_clockwise)
         pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
         if pixmap.isNull():
             return pixmap
@@ -1396,10 +1422,21 @@ class VProofPanel(QWidget):
         if self._viewer_page_uid != entry.page_uid:
             self._image.set_image_from_qimage(pixmap.toImage())
             self._viewer_page_uid = entry.page_uid
-        x_scale = pixmap.width() / page.width if page.width > 0 else 1.0
-        y_scale = pixmap.height() / page.height if page.height > 0 else 1.0
+        display_width, display_height = rotated_size(
+            page.width,
+            page.height,
+            page.display_rotation_quarters_clockwise,
+        )
+        x_scale = pixmap.width() / display_width if display_width > 0 else 1.0
+        y_scale = pixmap.height() / display_height if display_height > 0 else 1.0
 
         def to_scene(bbox: tuple[int, int, int, int]) -> _SceneBBox:
+            bbox = rotate_bbox(
+                bbox,
+                page.width,
+                page.height,
+                page.display_rotation_quarters_clockwise,
+            )
             left, top, right, bottom = bbox
             return _SceneBBox(
                 round(left * x_scale),
@@ -1427,12 +1464,24 @@ class VProofPanel(QWidget):
         pixmap = self._page_pixmaps.get(page_uid)
         if page is None or pixmap is None or pixmap.isNull():
             return False
-        x_scale = pixmap.width() / page.width if page.width > 0 else 1.0
-        y_scale = pixmap.height() / page.height if page.height > 0 else 1.0
+        display_width, display_height = rotated_size(
+            page.width,
+            page.height,
+            page.display_rotation_quarters_clockwise,
+        )
+        x_scale = pixmap.width() / display_width if display_width > 0 else 1.0
+        y_scale = pixmap.height() / display_height if display_height > 0 else 1.0
         if x_scale <= 0 or y_scale <= 0:
             return False
-        point_x = scene_x / x_scale
-        point_y = scene_y / y_scale
+        display_x = scene_x / x_scale
+        display_y = scene_y / y_scale
+        point_x, point_y = source_point_from_display(
+            display_x,
+            display_y,
+            page.width,
+            page.height,
+            page.display_rotation_quarters_clockwise,
+        )
         best: tuple[int, ProofLineView] | None = None
         for line in self._lines.values():
             if line.page_uid != page_uid or line.bbox is None:

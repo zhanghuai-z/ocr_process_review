@@ -1345,7 +1345,7 @@ def test_hproof_word_carrier_draws_and_selects_one_word_occurrence(
     row._refresh_editor_geometry()
     overlays = row.editor.atom_visual_overlays()
 
-    assert row._proof_char_spans() == {0: (10.0, 30.0), 1: (10.0, 30.0)}
+    assert row._proof_char_spans() == {0: (0.0, 20.0), 1: (0.0, 20.0)}
     assert len(overlays) == 1
     assert (overlays[0].kind, overlays[0].text) == ("word", "ab")
     assert (overlays[0].start, overlays[0].end) == (0, 2)

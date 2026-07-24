@@ -8,6 +8,7 @@ import pytest
 
 import app.services.ocr_job_service as module
 from app.application.ocr_workspace import build_ocr_workspace_view
+from app.application.proof_workspace import build_proof_workspace_view
 from app.core.layout_scope import layout_snapshot_fingerprint
 from app.core.ocr_currentness import current_ocr_failure, current_ocr_observation
 from app.core.workflow_state import page_gate_info
@@ -146,6 +147,13 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
 
     pointer = session.ocr_observation_repository.get_active_pointer("page-1")
     assert pointer.batch_uid == commit.batch_uid
+    run = session.ocr_observation_repository.all_runs()[0]
+    assert dict(run.metadata)["display_rotation_quarters_clockwise"] == "0"
+    assert dict(run.metadata)["display_rotation_source"] == (
+        "ppocrv6:textline_orientation_consensus"
+    )
+    proof_workspace = build_proof_workspace_view(session)
+    assert proof_workspace.pages[0].display_rotation_quarters_clockwise == 0
     assert len(session.ocr_observation_repository.all_lines()) == 1
     batch = session.ocr_observation_repository.get_batch(commit.batch_uid)
     atom = session.ocr_observation_repository.get_atom(batch.atom_uids[0])

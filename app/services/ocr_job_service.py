@@ -9,6 +9,7 @@ from typing import Callable, Protocol
 import numpy as np
 
 from app.core.layout_scope import layout_snapshot_fingerprint
+from app.core.ocr_display_orientation import observe_page_display_orientation
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.models.charocr_execution import CharOcrPageRequest, CharOcrPageResult
 from app.models.entity_id import new_ulid
@@ -239,6 +240,16 @@ class OcrJobService:
             or result.input_fingerprint != charocr_request.input_fingerprint
         ):
             raise RuntimeError("CharOCR result does not match its immutable request")
+        orientation = observe_page_display_orientation(routing_plan)
+        orientation_metadata = orientation.metadata()
+        orientation_keys = {key for key, _value in orientation_metadata}
+        result = replace(
+            result,
+            metrics=(
+                *(item for item in result.metrics if item[0] not in orientation_keys),
+                *orientation_metadata,
+            ),
+        )
         batch_records = _observation_records(
             project_uid=job.project_uid,
             page_uid=page.uid,

@@ -91,6 +91,12 @@ from app.ui.proof.formula_renderer import (
     materialize_formula_preview,
     render_formula_pixmap,
 )
+from app.ui.image_orientation import (
+    rotate_bbox,
+    rotate_pixmap,
+    rotated_size,
+    source_point_from_display,
+)
 from app.ui.widgets.page_thumbnail import PAGE_ROW_H, PageDirectoryRow
 
 
@@ -1937,6 +1943,7 @@ class _ProofPageCard(PageDirectoryRow):
             page.source_path or page.image_path,
             source,
             badge_text=f"第 {page.page_number} 页",
+            rotation_quarters_clockwise=page.display_rotation_quarters_clockwise,
             parent=parent,
         )
         self.page = page
@@ -2788,6 +2795,10 @@ class _ProofRowWidget(QFrame):
                     None,
                 )
             painter.end()
+        source = rotate_pixmap(
+            source,
+            self.row.page.display_rotation_quarters_clockwise,
+        )
         opacity = self._visual_opacity
         if opacity < 1.0:
             faded = QPixmap(source.size())
@@ -2828,6 +2839,12 @@ class _ProofRowWidget(QFrame):
         """
 
         spans: dict[int, tuple[float, float]] = {}
+        if self._line_bbox is None:
+            return spans
+        line_left, line_top, line_right, line_bottom = self._line_bbox
+        crop_width = max(1, line_right - line_left)
+        crop_height = max(1, line_bottom - line_top)
+        turns = self.row.page.display_rotation_quarters_clockwise
         proof_text = self.row.line.proof_text
         for placement in self.row.atom_placements:
             # display formula/table 行不使用槽位几何（源码编辑/表格视图）；
@@ -2838,7 +2855,18 @@ class _ProofRowWidget(QFrame):
             indices = placement.char_indices
             if not indices:
                 continue
-            left, _top, right, _bottom = placement.atom.bbox
+            atom_left, atom_top, atom_right, atom_bottom = placement.atom.bbox
+            left, _top, right, _bottom = rotate_bbox(
+                (
+                    atom_left - line_left,
+                    atom_top - line_top,
+                    atom_right - line_left,
+                    atom_bottom - line_top,
+                ),
+                crop_width,
+                crop_height,
+                turns,
+            )
             if placement.atom.granularity.strip().lower() == "word":
                 for index in indices:
                     spans[index] = (float(left), float(right))
@@ -2914,11 +2942,15 @@ class _ProofRowWidget(QFrame):
         slot_centers: list[float | None] | None = None
         slot_widths: list[float] | None = None
         if geometry_valid and self._line_bbox is not None:
-            line_left, _top, line_right, _bottom = self._line_bbox
-            line_width = max(1, line_right - line_left)
+            line_left, line_top, line_right, line_bottom = self._line_bbox
+            line_width, _line_height = rotated_size(
+                max(1, line_right - line_left),
+                max(1, line_bottom - line_top),
+                self.row.page.display_rotation_quarters_clockwise,
+            )
             scale = displayed_width / line_width
             desired = {
-                index: (span[0] - line_left) * scale
+                index: span[0] * scale
                 for index, span in spans.items()
             }
             desired_widths = {
@@ -3011,8 +3043,21 @@ class _ProofRowWidget(QFrame):
             and y_offset <= point.y() < y_offset + displayed_size.height()
         ):
             return None
-        source_x = point.x() * crop_size.width() / displayed_size.width()
-        source_y = (point.y() - y_offset) * crop_size.height() / displayed_size.height()
+        turns = self.row.page.display_rotation_quarters_clockwise
+        display_crop_width, display_crop_height = rotated_size(
+            crop_size.width(), crop_size.height(), turns
+        )
+        display_x = point.x() * display_crop_width / displayed_size.width()
+        display_y = (
+            (point.y() - y_offset) * display_crop_height / displayed_size.height()
+        )
+        source_x, source_y = source_point_from_display(
+            display_x,
+            display_y,
+            crop_size.width(),
+            crop_size.height(),
+            turns,
+        )
         line_left, line_top, line_right, line_bottom = line_bbox
         page_x = line_left + source_x * (line_right - line_left) / crop_size.width()
         page_y = line_top + source_y * (line_bottom - line_top) / crop_size.height()

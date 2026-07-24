@@ -21,6 +21,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImageReader, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
+from app.ui.image_orientation import rotate_image, rotated_size
 from app.ui.widgets.effects import apply_soft_shadow
 
 PAGE_THUMB_W = 150
@@ -34,6 +35,7 @@ def make_page_thumbnail(
     width: int = PAGE_THUMB_W,
     height: int = PAGE_THUMB_H,
     device_pixel_ratio: float = 1.0,
+    rotation_quarters_clockwise: int = 0,
 ) -> QPixmap:
     """Cover-style thumbnail: expanding scale + centered crop, DPR aware.
 
@@ -50,16 +52,22 @@ def make_page_thumbnail(
     source_size = reader.size()
     if source_size.width() <= 0 or source_size.height() <= 0:
         return QPixmap()
-    scale = max(target_w / source_size.width(), target_h / source_size.height())
+    display_width, display_height = rotated_size(
+        source_size.width(),
+        source_size.height(),
+        rotation_quarters_clockwise,
+    )
+    scale = max(target_w / display_width, target_h / display_height)
     reader.setScaledSize(
         QSize(
-            max(target_w, round(source_size.width() * scale)),
-            max(target_h, round(source_size.height() * scale)),
+            max(1, round(source_size.width() * scale)),
+            max(1, round(source_size.height() * scale)),
         )
     )
     image = reader.read()
     if image.isNull():
         return QPixmap()
+    image = rotate_image(image, rotation_quarters_clockwise)
     x = max(0, (image.width() - target_w) // 2)
     y = max(0, (image.height() - target_h) // 2)
     thumb = QPixmap.fromImage(image.copy(x, y, target_w, target_h))
@@ -77,6 +85,7 @@ class PageDirectoryRow(QWidget):
         image_path: str,
         *,
         badge_text: str | None = None,
+        rotation_quarters_clockwise: int = 0,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -104,6 +113,7 @@ class PageDirectoryRow(QWidget):
         self.thumbnail = make_page_thumbnail(
             image_path,
             device_pixel_ratio=self.devicePixelRatioF(),
+            rotation_quarters_clockwise=rotation_quarters_clockwise,
         )
         if not self.thumbnail.isNull():
             self._thumb_label.setPixmap(self.thumbnail)

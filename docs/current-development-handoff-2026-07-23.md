@@ -12,7 +12,7 @@
 - 本轮研究起始基线：`2620f29 fix: use routed foreground for degraded words`
 - 本轮研究开始时，该分支领先远端 45 个提交。
 - 工作区包含大量用户样例、实验脚本、未跟踪文件和已删除的旧报告。不要批量清理、恢复或提交它们。
-- 最近完整回归：`366 passed in 22.13s`（2026-07-24，WSL、`QT_QPA_PLATFORM=offscreen`）。
+- 最近完整回归：`374 passed in 30.56s`（2026-07-24，WSL、`QT_QPA_PLATFORM=offscreen`）。
 
 开始工作前执行：
 
@@ -97,7 +97,7 @@ python -m pytest -q
 - 已从原始 PP JSON 与回放确认：`T00031_00.jpg` 的 PP word 是 `goubmieibsout`，bbox 为 `[942,1747,1263,1795]`，后处理 route 扩为 `[926,1746,1286,1809]`；扩出的右侧前景被 EngCut 识别为额外 `]`，产生 `goubmieibsout]`。相邻右引号 `”` 在 PP 中是独立 word，`[`/左引号属于周边行上下文。现有 `symbol_conflicts` 只覆盖已配对的相邻 PP symbol，未标出这个越界样例；这是诊断覆盖缺口，不是字符碎片退级证据。
 - 2026-07-24 CJK 字框清理实验：`scripts/experiment_cjk_slot_bbox_cleanup.py` 只读 `file/0724test/test1.ocrproj` 中持久化的 LineCut atom，不改变文本、顺序、项目或 Proof。被导入的源图是纯 `0/255` 二值图。首轮“字符中心中点槽 + 槽内全前景”会让 560 个 CJK atom 全部改框并从原框外吸入墨迹，已否决。保守版只在相邻可见 atom 中心之间搜索纵向投影空谷，并且候选 bbox 只能在原 LineCut bbox 内收缩：560 个 CJK atom 中 64 个排除原框边缘墨迹，其中 58 个位于不穿墨的空谷之外；39 个样例的槽边仍有墨迹、4 个样例搜索区没有空谷，均只标风险。26 个 `族` 中 5 个属于空谷外多余墨迹，另有 2 个涉及槽边风险。生产仅采纳“空缝且槽边无墨迹”的内收候选；风险样例保持原框。
 - 同一 CJK 实验已扩到 `file/2/temp/68_page.ocrproj` 的全部 68 页。该项目仍是旧 `page/block/line/char_` 表结构；脚本通过只读、仅诊断的 `legacy_v1_diagnostic_adapter` 按显式 `bbox_source=hanwang:micro_recblock` 归一化输入，没有修改生产持久化或迁移器。32,846 个可测 CJK atom 中 9,200 个候选 bbox 发生变化，但只有 159 个实际排除黑色墨迹，118 个属于空谷外墨迹；2,289 个存在槽边墨迹风险，45 个搜索区没有空谷。绝大多数“变化”只是收紧原 bbox 内空白，不得等同于质量修复。逐页 overlay、分页裁片、风险分册、JSON 摘要和 HTML 索引已经生成；用户已逐页查看并反馈未见明显副作用，形成了上述保守生产接受条件。
-- 2026-07-24 生产接入：`app/engines/hanwang/geometry_postprocess.py` 提供不改图、不改文本的像素测量；`micro_recblock.py` 在 EngCut 输出完成后增加右倾 word 退级，在物理路由行组装后增加 CJK bbox 内收。右倾只处理至少两个拉丁字母、唯一 PP token 和唯一 route foreground bbox；命中后沿用既有明确标源 PP word atom 路径，native 文本/框保留为外部候选。与本行明确 `PpOcrSymbolObservation` 相交的额外符号阻止右倾退级。CJK 清理后的 atom 使用 `hanwang:micro_recblock:cjk_empty_seam_cleanup`，原 LineCut bbox 作为外部候选保留。两条路径都不改变 Layout、routing plan、Proof 或 PP 原始 observation，实验脚本/JSON 不参与运行时。
+- 2026-07-24 生产接入及激活修正：`app/engines/hanwang/geometry_postprocess.py` 提供不改图、不改文本的像素测量；`micro_recblock.py` 在 EngCut 输出完成后增加右倾 word 退级，在物理路由行组装后增加 CJK bbox 内收。首次接入时 CJK 分支错误依赖尚未赋值的 `_NativeAtomResult.bbox_granularity`，因此生产计数始终为 0，只有手工补 granularity 的测试实际运行；`2afd71d` 改为在 postprocess 边界依据有效 bbox 明确采用 char 几何，并复用每页一次计算的前景 mask。对 `file/0724test/test2.ocrproj` 的只读回放覆盖 68/68 页、1664 行，提出 8814 个 CJK bbox 内收；项目中原保存 run 的对应计数仍全为 0，回放未修改项目。右倾只处理至少两个拉丁字母、唯一 PP token 和唯一 route foreground bbox；命中后沿用既有明确标源 PP word atom 路径，native 文本/框保留为外部候选。与本行明确 `PpOcrSymbolObservation` 相交的额外符号阻止右倾退级。CJK 清理后的 atom 使用 `hanwang:micro_recblock:cjk_empty_seam_cleanup`，原 LineCut bbox 作为外部候选保留。两条路径都不改变 Layout、routing plan、Proof 或 PP 原始 observation，实验脚本/JSON 不参与运行时。
 - 生产斜率实现已对离线报告中的 1319 个可测 token 复算：右倾 `>=0.12` 且投影改善 `>=0.05` 的 95 个 slope-only 判定与实验实现逐项一致。当前按用户确认的召回优先标准不再要求结构冲突；正体 Latin 被额外合并为 word 可接受。独立标点所有权仍不得由该退级路径推断或吞入。
 
 完整 JSON 和四联回显图位于 `D:\project\ocr_process\worktrees\coord\debug\italic_token_fallback_study_20260723`；该目录是诊断产物，不是生产依赖或权威事实。
@@ -127,6 +127,7 @@ CJK 字框清理 JSON、`族` 对照、空谷候选和边界风险回显位于 `
 - `granularity="word"` 的 atom 以完整 bbox 和文本范围生成一个 word overlay；横校不推断词内字符位置，单击选择整词，双击编辑整词范围。char atom 仍保持逐字槽位。
 - 行内公式使用气泡编辑；独立公式使用原稿、渲染结果、源码三栏。
 - 公式序号是可丢弃的软链接，不合并两个 OCR/proof 事实。
+- atom 之间达到明确阈值的大段几何间隔只生成无文本视觉 spacer；字符仍保持正常 atom 宽度，点击 spacer 不选择相邻字符。字符墨迹区仍按 atom bbox 定位。
 
 ### 纵校
 
@@ -135,6 +136,13 @@ CJK 字框清理 JSON、`族` 对照、空谷候选和边界风险回显位于 `
 - 每个实例通过稳定 UID、page、line/text unit、bbox 和 crop 元数据引用上下文，不持有独立文本副本。
 - OCR 文本上下文按整页呈现并高亮当前字符或词；原稿图同样由 page+bbox 定位。word occurrence 替换其显式 `[char_index, char_end)` 范围。
 - 修改最终提交到共享 `ProofTextUnit`，横校和纵校随后读取同一新工作区。
+- 纵校 crop padding 按字形短边计算：ASCII 字母/数字 1 px、ASCII 标点 2 px、其他字符 10% 且封顶 6 px；padding 只扩展示图裁片，不改变 OCR atom bbox。
+
+### 页面显示方向
+
+- `OcrJobService` 从本次 `PageRoutingPlan` 中可分派文本行的 `text_axis + orientation_angle` 形成加权共识，并把 `display_rotation_quarters_clockwise`、来源和权重证据写入不可变 `OcrRun.metadata`。它是 OCR 外部观察的显示元数据，不是 `PageRecord`、`LayoutSnapshot` 或 bbox 的新真值。
+- `ProofWorkspaceView` 只从当前 active OCR observation 读取该值；横校行图、横校目录缩略图、纵校字符 crop 和纵校整页查看器统一旋转显示，框先由原图坐标变换到显示坐标，点击再逆变换回原图坐标。源图、页面宽高、Layout/OCR bbox 和导出均保持原方向。
+- 非零方向需要至少 4 权重且占可分派文本方向权重的 65%；无法形成明确共识时记录为 0。旧项目没有该 metadata 时严格显示 0，不从页面长宽或旧 OCR 结果猜测；重新 OCR 后才会产生此观察。
 
 当前实现边界：`ProofWorkspaceView` 是一次性只读投影；HProof/VProof 只持有焦点、选择和未提交 editor 状态；所有修改通过 `ProofSessionService` 的 CAS 命令提交。不得恢复旧 `Page/Line` 直接修改、panel bus、`merge_pages()` 或 stale-editor 补丁链。
 
@@ -194,7 +202,7 @@ P2 代码已完成：LayoutPanel 相同投影/页面短路并删除任务完成�
 再按任务读取 routing-truth-contract.md、
 docs/charocr-routing-architecture-review-2026-07-20.md 或
 docs/ui-equivalence-performance-audit-2026-07-22.md。
-当前代码基线为 04b1498。先用代码、持久化路径和测试核对文档事实；
+当前代码基线以 `git log -1` 为准。先用代码、持久化路径和测试核对文档事实；
 不要恢复旧 Page/Block/Line 投影、proof 双文本、静默 fallback 或兼容链。
 工作区有大量用户样例和实验文件，不要批量清理。
 ```
