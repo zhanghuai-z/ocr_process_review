@@ -90,9 +90,12 @@ python -m pytest -q
 - 已从 2026-07-23 全量诊断确认：`test3` 连续 3 次输出稳定；`file/1` 与 `file/2` 共 111 页中 108 页完成、3 页复现既有生产阻断（`120193.tif`、`120196.tif`、`T00036_00.jpg`），成功页采集 3377 个单 PP token。当前规则产生 121 个 word fallback；诊断阈值 conservative/balanced/broad 分别会产生 332/401/1224 个。
 - 已从回显图确认：前景组件切分比例能覆盖上述目标斜体碎框，但也会命中正常数字和部分正常拉丁词。因此三个扩大策略都只是对比样本，当前证据不足以选择生产阈值；旧斜率分桶也不能单独作为斜体判据。
 - 已从代码和回放确认：`Growth:`、`Governments:` 一类问题是 PP 独立标点被拉丁 route 的矩形包络吞入，属于符号所有权冲突，不得借 word fallback 静默吸收。诊断对所有候选策略都返回 `routing_symbol_conflict`。
+- 2026-07-24 拉丁倾斜门控实验：`scripts/experiment_latin_token_slant_gate.py` 在上一轮不可变诊断 JSON 上去重，只测量至少含两个拉丁字母、无符号所有权冲突且已有唯一 owned foreground 的 token。它用剪切校正后的纵向投影集中度估计方向，并要求同时存在前景组件切分冲突。1319 个可测 token 中，右倾 `slope>=0.12`、投影改善 `>=0.05` 的对比门控选出 38 个：24 个已由当前规则退级，新增 14 个只来自 `120166/120180` 的斜体区域；4 个已知坏框全部命中，3 个已知正常对照全部保留。绝对斜率会额外误收 `23AXW003`、`very`、`WMF` 等 5 个左倾峰样本，故不能使用绝对值。该结果支持“右倾证据 + 组件切分冲突”的组合方向，但栅格斜率峰集中量化在 `0.25`，全量没有人工字体标签，尚不足以确定生产阈值或接入生产。
 - 尚未实施：没有修改 OCR 路由、EngCut 退级、atom 文本/几何、Proof 或持久化。生产实现前仍需获得可区分目标碎框与正常字框的判据，并单独研究独立标点所有权。
 
 完整 JSON 和四联回显图位于 `D:\project\ocr_process\worktrees\coord\debug\italic_token_fallback_study_20260723`；该目录是诊断产物，不是生产依赖或权威事实。
+
+拉丁倾斜门控报告与候选/方向拒绝回显位于 `D:\project\ocr_process\worktrees\coord\debug\latin_token_slant_gate_20260724`，同样只属于诊断证据。
 
 ## 校对心智
 
