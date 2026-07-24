@@ -154,6 +154,10 @@ def test_layout_edit_makes_previous_ocr_batch_non_current() -> None:
     assert workbench.has_ocr("page-1") is False
     assert workbench.ocr_workspace().pages[0].batch_uid is None
     assert workbench.pending_ocr_page_uids() == ("page-1",)
+    gate = workbench.page_gate("page-1")
+    assert gate.page_state == "ocr_invalidated"
+    assert gate.action_key == "rerun_ocr"
+    assert gate.action_label == "重新进入 OCR"
 
 
 def test_page_image_change_makes_previous_ocr_batch_non_current() -> None:

@@ -23,18 +23,23 @@ from app.services import ImportService
 from app.ui.main_window import MainWindow, _ShellProgress
 
 
-def _page(session: ProjectSession) -> PageRecord:
+def _page(
+    session: ProjectSession,
+    *,
+    uid: str = "page-1",
+    page_number: int = 1,
+) -> PageRecord:
     record = PageRecord(
         project_uid=session.project_uid,
-        uid="page-1",
-        image_path="/tmp/page-1.png",
+        uid=uid,
+        image_path=f"/tmp/{uid}.png",
         source_path="source.png",
         cache_image_path="",
         thumbnail_path="",
         width=100,
         height=80,
-        page_number=1,
-        source_page_index=0,
+        page_number=page_number,
+        source_page_index=page_number - 1,
         status="imported",
         error="",
         image_hash="image-hash",
@@ -48,10 +53,10 @@ def _layout(session: ProjectSession, page: PageRecord) -> None:
     artifact = session.paddle_artifact_repository.append(
         PaddleArtifact(
             project_uid=session.project_uid,
-            uid="artifact-1",
+            uid=f"artifact-{page.uid}",
             page_uid=page.uid,
             source_engine="test",
-            source_run_id="layout-run",
+            source_run_id=f"layout-run-{page.uid}",
             image_hash=page.image_hash,
             payload_json="{}",
         )
@@ -62,7 +67,7 @@ def _layout(session: ProjectSession, page: PageRecord) -> None:
             revision=1,
             artifact_uid=artifact.uid,
             source_engine="test",
-            source_run_id="layout-run",
+            source_run_id=f"layout-run-{page.uid}",
             blocks=(),
         ),
         expected_revision=0,
@@ -83,6 +88,26 @@ def test_workflow_state_uses_adopted_session_facts() -> None:
     assert compute_max_step(session) == STEP_OCR
     assert pending_ocr_page_uids(session) == (page.uid,)
     assert page_gate_info(session, page.uid).action_enabled is True
+
+
+def test_controller_orders_all_pending_ocr_pages_with_submitted_page_first() -> None:
+    session = ProjectSession(ProjectRecord("project-1", "Book"))
+    pages = tuple(
+        _page(session, uid=f"page-{index}", page_number=index)
+        for index in range(1, 4)
+    )
+    for page in pages:
+        _layout(session, page)
+    controller = WorkflowController(
+        application=WorkbenchApplication(session=session, import_service=ImportService())
+    )
+
+    assert controller.pending_ocr_page_uids("page-2") == (
+        "page-2",
+        "page-1",
+        "page-3",
+    )
+    controller.close()
 
 
 def test_controller_import_emits_immutable_records(tmp_path: Path) -> None:

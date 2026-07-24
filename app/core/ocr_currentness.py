@@ -40,4 +40,17 @@ def current_ocr_observation(
     return CurrentOcrObservation(pointer=pointer, run=run, batch=batch)
 
 
-__all__ = ["CurrentOcrObservation", "current_ocr_observation"]
+def has_active_ocr_pointer(session: ProjectSession, page_uid: str) -> bool:
+    """Return whether the page has ever adopted an OCR observation pointer."""
+    try:
+        session.ocr_observation_repository.get_active_pointer(page_uid)
+    except RecordNotFoundError:
+        return False
+    return True
+
+
+__all__ = [
+    "CurrentOcrObservation",
+    "current_ocr_observation",
+    "has_active_ocr_pointer",
+]

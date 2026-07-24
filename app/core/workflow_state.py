@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.ocr_currentness import current_ocr_observation
+from app.core.ocr_currentness import current_ocr_observation, has_active_ocr_pointer
 from app.models.project_session import PageRecord, ProjectSession, RecordNotFoundError
 
 
@@ -134,6 +134,16 @@ def page_gate_info(session: ProjectSession, page_uid: str) -> PageGateInfo:
             action_key="enter_ocr",
             action_label="提交并进入 OCR",
             action_enabled=False,
+        )
+    if has_active_ocr_pointer(session, page.uid):
+        return PageGateInfo(
+            page_state="ocr_invalidated",
+            is_pending=True,
+            reason_code="invalidated_after_input_change",
+            reason_text="当前页图像或版面已变更，需要重新进入 OCR",
+            action_key="rerun_ocr",
+            action_label="重新进入 OCR",
+            action_enabled=True,
         )
     return PageGateInfo(
         page_state="ocr_ready",

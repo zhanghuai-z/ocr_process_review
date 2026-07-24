@@ -652,12 +652,21 @@ class WorkflowController(QObject):
 
     # ------------------------------------------------------------------ OCR
 
+    def pending_ocr_page_uids(self, preferred_page_uid: str = "") -> tuple[str, ...]:
+        pending = self._application.pending_ocr_page_uids()
+        if not preferred_page_uid or preferred_page_uid not in pending:
+            return pending
+        return (
+            preferred_page_uid,
+            *(page_uid for page_uid in pending if page_uid != preferred_page_uid),
+        )
+
     def start_ocr(self, page_uids: Iterable[str] | None = None) -> bool:
         if not self._application.has_project:
             raise RuntimeError("OCR requires an active project")
         if self.has_running_workers():
             return False
-        selected = tuple(page_uids) if page_uids is not None else self._application.pending_ocr_page_uids()
+        selected = tuple(page_uids) if page_uids is not None else self.pending_ocr_page_uids()
         if not selected:
             raise ValueError("OCR has no pending page UIDs")
         for page_uid in selected:

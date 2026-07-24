@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
         self._start_ocr_for_pages(None)
 
     def _on_ocr_entry_requested(self, _source: str, page_uid: str) -> None:
-        self._start_ocr_for_pages((page_uid,))
+        self._start_ocr_for_pages(self._controller.pending_ocr_page_uids(page_uid))
 
     def _start_ocr_for_pages(self, page_uids: tuple[str, ...] | None) -> None:
         try:
