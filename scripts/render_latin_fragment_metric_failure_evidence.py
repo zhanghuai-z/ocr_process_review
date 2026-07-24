@@ -149,6 +149,7 @@ def _draw_bbox(
 
 def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     quality = record["production_word_quality"]
+    status = str(record.get("word_box_status") or "FINAL")
     image = _read_image(record["source_image"])
     boxes = [
         [int(item) for item in record["route_bbox"]],
@@ -188,7 +189,7 @@ def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     for label, panel in (
         ("RAW CONTEXT", raw),
         ("NATIVE: RED CHAR / BLUE PP", native),
-        ("FINAL: GREEN WORD / ORANGE OTHER / BLUE PP", final),
+        (f"{status}: GREEN WORD / ORANGE OTHER / BLUE PP", final),
     ):
         panel = cv2.resize(
             panel, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST
@@ -216,7 +217,7 @@ def _render_word_quality_row(record: dict[str, Any]) -> np.ndarray:
     word = quality["word_atom"]
     cv2.putText(
         header,
-        f"{record['source_name']} | PP={record['text']} | FINAL WORD={word['text']} | source={word['source']}",
+        f"{record['source_name']} | PP={record['text']} | {status} WORD={word['text']} | source={word['source']}",
         (6, 23),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.43,
