@@ -119,13 +119,16 @@ def _char_index_group(text: str) -> int:
 
 
 def _gallery_crop_pad(entry: ProofCharView) -> int:
-    """Return geometry-only safety padding for a character thumbnail."""
+    """Return bounded context padding without pulling in adjacent glyphs."""
 
     if entry.bbox is None:
         return 0
     left, top, right, bottom = entry.bbox
-    longest_edge = max(1, right - left, bottom - top)
-    return max(2, round(longest_edge * 0.12))
+    text = entry.text or ""
+    if len(text) == 1 and text.isascii() and not text.isspace():
+        return 1 if text.isalnum() else 2
+    shortest_edge = max(1, min(right - left, bottom - top))
+    return max(2, min(6, round(shortest_edge * 0.10)))
 
 
 def _page_pixmap(

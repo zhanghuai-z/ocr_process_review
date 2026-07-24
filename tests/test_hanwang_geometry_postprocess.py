@@ -61,7 +61,7 @@ def test_conservative_cjk_cleanup_tightens_only_inside_clear_seams():
     assert proposals == {0: (8, 8, 17, 23), 1: (29, 7, 38, 24)}
 
 
-def test_cjk_production_adapter_preserves_native_bbox_observation():
+def test_cjk_production_adapter_infers_native_char_granularity_before_cleanup():
     image = np.full((32, 52, 3), 255, np.uint8)
     image[8:23, 8:17] = 0
     image[7:24, 29:38] = 0
@@ -69,12 +69,8 @@ def test_cjk_production_adapter_preserves_native_bbox_observation():
         text="中文",
         bbox=(4, 4, 46, 27),
         chars=[
-            micro_module._NativeAtomResult(
-                text="中", bbox=(5, 5, 25, 26), bbox_granularity="char"
-            ),
-            micro_module._NativeAtomResult(
-                text="文", bbox=(25, 5, 45, 26), bbox_granularity="char"
-            ),
+            micro_module._NativeAtomResult(text="中", bbox=(5, 5, 25, 26)),
+            micro_module._NativeAtomResult(text="文", bbox=(25, 5, 45, 26)),
         ],
     )
     route = RoutingLine(

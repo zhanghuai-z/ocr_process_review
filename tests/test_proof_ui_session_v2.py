@@ -1250,6 +1250,36 @@ def test_vproof_gallery_crop_padding_depends_only_on_character_geometry(
     assert _gallery_crop_pad(entry) == 2
 
 
+def test_vproof_gallery_crop_padding_is_bounded_for_tall_and_word_boxes() -> None:
+    from app.ui.proof.confidence_view import ProofCharView
+    from app.ui.proof.v_proof import _gallery_crop_pad
+
+    def entry(text: str, bbox: tuple[int, int, int, int]) -> ProofCharView:
+        return ProofCharView(
+            proof_uid="proof-1",
+            text_unit_uid="unit-1",
+            char_index=0,
+            char_end=len(text),
+            text=text,
+            page_uid="page-1",
+            page_number=1,
+            image_path="page.png",
+            line_uid="line-1",
+            region_uid="region-1",
+            atom_uid="atom-1",
+            atom_index=0,
+            bbox=bbox,
+            confidence=None,
+            ocr_char=text,
+            available=True,
+        )
+
+    assert _gallery_crop_pad(entry("A", (10, 10, 18, 60))) == 1
+    assert _gallery_crop_pad(entry("中", (10, 10, 50, 60))) == 4
+    assert _gallery_crop_pad(entry("Finance", (10, 10, 210, 60))) == 5
+    assert _gallery_crop_pad(entry("长文本", (10, 10, 410, 110))) == 6
+
+
 def test_char_views_keep_one_word_bbox_as_one_range_occurrence(
     qapp,
     tmp_path,

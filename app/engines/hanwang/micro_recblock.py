@@ -43,6 +43,7 @@ from .engcut_payload import (
 from .geometry_postprocess import (
     LineAtomGeometry,
     conservative_cjk_bbox_cleanup,
+    dark_foreground_mask,
     is_latin_right_slant_fallback,
     measure_latin_right_slant,
 )
@@ -887,6 +888,7 @@ def _assemble_layout_route_line(
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
     stats: RunStats,
     image_bgr: np.ndarray | None = None,
+    page_foreground: np.ndarray | None = None,
 ) -> list[_NativeLineResult]:
     segments = route.segments
     if not segments:
@@ -938,7 +940,9 @@ def _assemble_layout_route_line(
             route,
             stats,
         )
-        return _postprocess_cjk_line_geometry(image_bgr, route, lines, stats)
+        return _postprocess_cjk_line_geometry(
+            image_bgr, route, lines, stats, page_foreground=page_foreground
+        )
 
     clusters = _cluster_lines_by_shape(all_text_lines)
     if not clusters:
@@ -1027,7 +1031,9 @@ def _assemble_layout_route_line(
             )
         )
     lines = _apply_route_text_observations(assembled, route, stats)
-    return _postprocess_cjk_line_geometry(image_bgr, route, lines, stats)
+    return _postprocess_cjk_line_geometry(
+        image_bgr, route, lines, stats, page_foreground=page_foreground
+    )
 
 
 def _assemble_routing_lines(
@@ -1037,6 +1043,7 @@ def _assemble_routing_lines(
     grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
     stats: RunStats,
     image_bgr: np.ndarray | None = None,
+    page_foreground: np.ndarray | None = None,
 ) -> list[_NativeLineResult]:
     if not line_routes:
         return []
@@ -1050,6 +1057,7 @@ def _assemble_routing_lines(
                 grouped_lines=grouped_lines,
                 stats=stats,
                 image_bgr=image_bgr,
+                page_foreground=page_foreground,
             )
         )
     assembled.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
@@ -1061,6 +1069,8 @@ def _postprocess_cjk_line_geometry(
     route: RoutingLine,
     lines: list[_NativeLineResult],
     stats: RunStats,
+    *,
+    page_foreground: np.ndarray | None = None,
 ) -> list[_NativeLineResult]:
     if (
         image_bgr is None
@@ -1076,7 +1086,10 @@ def _postprocess_cjk_line_geometry(
                 text=atom.text,
                 bbox=atom.bbox,
                 source=atom.source,
-                granularity=atom.bbox_granularity,
+                granularity=(
+                    atom.bbox_granularity
+                    or ("char" if atom.bbox is not None else "fallback")
+                ),
             )
             for index, atom in enumerate(line.chars)
         ]
@@ -1085,6 +1098,7 @@ def _postprocess_cjk_line_geometry(
             line.bbox,
             atoms,
             linecut_source=LINECUT_NATIVE_ATOM_SOURCE,
+            page_foreground=page_foreground,
         )
         if not proposals:
             processed.append(line)
@@ -3226,6 +3240,7 @@ def run_micro_recblock(
                 )
         stats.recog_seconds = time.time() - started
 
+        page_foreground = dark_foreground_mask(image_bgr)
         for block_idx in text_indices:
             block = ppvl_blocks[block_idx]
             label = _effective_label_for_block(block)
@@ -3254,6 +3269,7 @@ def run_micro_recblock(
                 grouped_lines=grouped_lines,
                 stats=stats,
                 image_bgr=image_bgr,
+                page_foreground=page_foreground,
             )
             _normalize_digitlike_numeric_context_lines(lines)
             hw_text = "".join(line.text for line in lines).strip()

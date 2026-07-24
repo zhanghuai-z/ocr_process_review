@@ -36,6 +36,7 @@ def conservative_cjk_bbox_cleanup(
     atoms: Sequence[LineAtomGeometry],
     *,
     linecut_source: str,
+    page_foreground: np.ndarray | None = None,
 ) -> dict[int, XYXY]:
     """Tighten eligible CJK boxes only across foreground-free ownership seams."""
     eligible = [
@@ -55,7 +56,13 @@ def conservative_cjk_bbox_cleanup(
     if pitch <= 0:
         return {}
 
-    foreground = _dark_foreground(image_bgr)
+    foreground = (
+        page_foreground
+        if page_foreground is not None
+        else dark_foreground_mask(image_bgr)
+    )
+    if foreground.shape != image_bgr.shape[:2]:
+        raise ValueError("page foreground mask must match the page image shape")
     band = _cjk_band(eligible, line_bbox)
     if band is None:
         return {}
@@ -259,7 +266,8 @@ def _slot_edge_has_ink(foreground: np.ndarray, bbox: XYXY) -> bool:
     return bool(left or right)
 
 
-def _dark_foreground(image_bgr: np.ndarray) -> np.ndarray:
+def dark_foreground_mask(image_bgr: np.ndarray) -> np.ndarray:
+    """Build the reusable dark-ink mask for one page image."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     return (gray < 128).astype(np.uint8)
 
