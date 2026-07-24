@@ -5,6 +5,7 @@ from .export_service import capture_export_snapshot
 from .import_service import ImportFailure, ImportJobRequest, ImportResult, ImportService
 from .layout_analysis_service import (
     LayoutAnalysisCommit,
+    LayoutPageJobFailure,
     LayoutPageJobRequest,
     LayoutPageJobResult,
     LayoutAnalysisService,
@@ -31,6 +32,7 @@ __all__ = [
     "ImportService",
     "LayoutAnalysisCommit",
     "LayoutAnalysisService",
+    "LayoutPageJobFailure",
     "LayoutPageJobRequest",
     "LayoutPageJobResult",
     "OcrJobService",

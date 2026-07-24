@@ -39,6 +39,7 @@ from app.services import (
     ImportService,
     LayoutAnalysisCommit,
     LayoutAnalysisService,
+    LayoutPageJobFailure,
     LayoutPageJobRequest,
     LayoutPageJobResult,
     OcrJobService,
@@ -105,6 +106,7 @@ class _LayoutServiceWorker(QThread):
     stage = Signal(str, int, int, str)
     cancelled = Signal()
     failed = Signal(str)
+    page_failed = Signal(object)
 
     def __init__(
         self,
@@ -123,16 +125,22 @@ class _LayoutServiceWorker(QThread):
         try:
             total = len(self._requests)
             if self._max_workers <= 1:
-                results: list[LayoutPageJobResult] = []
+                indexed_results: list[LayoutPageJobResult | None] = [None] * total
                 for index, request in enumerate(self._requests):
                     if self.isInterruptionRequested():
                         raise _TaskCancelled
                     self.stage.emit(request.page_uid, index + 1, total, "版面分析")
-                    results.append(self._service.execute_page(request))
+                    try:
+                        indexed_results[index] = self._service.execute_page(request)
+                    except Exception as exc:
+                        message = str(exc).strip() or type(exc).__name__
+                        self.page_failed.emit(LayoutPageJobFailure(request, message))
                     self.progress.emit(index + 1, total)
                 if self.isInterruptionRequested():
                     raise _TaskCancelled
-                self.committed.emit(tuple(results))
+                self.committed.emit(tuple(
+                    result for result in indexed_results if result is not None
+                ))
                 return
 
             indexed_results: list[LayoutPageJobResult | None] = [None] * total
@@ -158,7 +166,11 @@ class _LayoutServiceWorker(QThread):
                     for future in done:
                         index = futures[future]
                         request = self._requests[index]
-                        indexed_results[index] = future.result()
+                        try:
+                            indexed_results[index] = future.result()
+                        except Exception as exc:
+                            message = str(exc).strip() or type(exc).__name__
+                            self.page_failed.emit(LayoutPageJobFailure(request, message))
                         completed += 1
                         self.progress.emit(completed, total)
                         self.stage.emit(request.page_uid, completed, total, "版面分析")
@@ -172,9 +184,9 @@ class _LayoutServiceWorker(QThread):
                     wait=True,
                     cancel_futures=True,
                 )
-            if any(result is None for result in indexed_results):
-                raise RuntimeError("layout worker completed without every page result")
-            self.committed.emit(tuple(indexed_results))
+            self.committed.emit(tuple(
+                result for result in indexed_results if result is not None
+            ))
         except _TaskCancelled:
             self.cancelled.emit()
             return
@@ -681,8 +693,12 @@ class WorkflowController(QObject):
         service = self._layout_analysis_service or self._build_default_layout_analysis_service()
         self._layout_analysis_service = service
         self._application.configure_layout_service(service)
+        source_run_id = f"layout_{new_ulid()}"
         requests = tuple(
-            self._application.prepare_layout_page(page_uid)
+            self._application.prepare_layout_page(
+                page_uid,
+                source_run_id=source_run_id,
+            )
             for page_uid in selected
         )
         worker = _LayoutServiceWorker(
@@ -703,6 +719,7 @@ class WorkflowController(QObject):
         worker.stage.connect(self._on_layout_stage)
         worker.cancelled.connect(self._on_layout_cancelled)
         worker.failed.connect(self._on_worker_failed)
+        worker.page_failed.connect(self._on_layout_page_failed)
         worker.finished.connect(lambda: self._clear_worker("_layout_worker", worker))
         self._emit_view_state()
         worker.start()
@@ -777,6 +794,12 @@ class WorkflowController(QObject):
         self.layout_cancelled.emit()
         self._emit_view_state()
 
+    def _on_layout_page_failed(self, failure: object) -> None:
+        if not isinstance(failure, LayoutPageJobFailure):
+            self._on_worker_failed("LayoutAnalysisService emitted an invalid page failure")
+            return
+        self.worker_error.emit(f"page {failure.request.page_uid}: {failure.message}")
+
     # ------------------------------------------------------------------ OCR
 
     def pending_ocr_page_uids(self, preferred_page_uid: str = "") -> tuple[str, ...]:
@@ -819,7 +842,7 @@ class WorkflowController(QObject):
                 default=2,
                 cap=20,
                 total=len(requests),
-            ),
+            ) if bool(getattr(service, "supports_parallel_pages", False)) else 1,
             parent=self,
         )
         self._ocr_worker = worker
@@ -904,16 +927,18 @@ class WorkflowController(QObject):
         if not jobs_url or not is_paddle_v16_endpoint(jobs_url):
             raise RuntimeError("hanwang OcrJobService requires a Paddle jobs endpoint")
         configured_timeout = max(1, int(config.get("api_timeout", 180)))
-        transport = PaddleV16LayoutClient(
-            jobs_url=jobs_url,
-            token=str(config.get("api_token", "") or ""),
-            request_timeout=min(max(10, configured_timeout), 30),
-            poll_timeout=max(configured_timeout, 180),
-            network_mode=str(config.get("paddle_api_network_mode", "auto") or "auto"),
-        )
+        def transport_factory() -> PaddleV16LayoutClient:
+            return PaddleV16LayoutClient(
+                jobs_url=jobs_url,
+                token=str(config.get("api_token", "") or ""),
+                request_timeout=min(max(10, configured_timeout), 30),
+                poll_timeout=max(configured_timeout, 180),
+                network_mode=str(config.get("paddle_api_network_mode", "auto") or "auto"),
+            )
+
         return OcrJobService(
-            prepass_client=PpOcrV6PrepassClient(transport),
-            vl_client=transport,
+            prepass_client_factory=lambda: PpOcrV6PrepassClient(transport_factory()),
+            vl_client_factory=transport_factory,
             engine=HanwangMicroRecBlockEngine(),
         )
 

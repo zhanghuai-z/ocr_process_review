@@ -183,12 +183,18 @@ class WorkbenchApplication:
     def configure_layout_service(self, service: LayoutAnalysisService) -> None:
         self._layout_service = service
 
-    def prepare_layout_page(self, page_uid: str) -> LayoutPageJobRequest:
+    def prepare_layout_page(
+        self,
+        page_uid: str,
+        *,
+        source_run_id: str | None = None,
+    ) -> LayoutPageJobRequest:
         service = self._require_layout_service()
         return service.prepare_page(
             self._require_session(),
             page_uid,
             expected_revision=self.layout_revision(page_uid),
+            source_run_id=source_run_id,
         )
 
     def execute_layout_page(self, request: LayoutPageJobRequest) -> LayoutPageJobResult:

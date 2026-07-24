@@ -10,6 +10,7 @@ from app.models.layout_snapshot import LayoutSnapshot
 from app.models.paddle_artifact import PaddleArtifact
 from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
 from app.services.import_service import ImportService
+from app.services.layout_analysis_service import LayoutPageJobRequest
 from app.services.ocr_job_service import OcrPageJobRequest, OcrPageJobResult
 
 
@@ -29,6 +30,22 @@ class _OverlapProbe:
             self.active -= 1
 
 
+def _layout_request(index: int, *, source_run_id: str = "layout-run") -> LayoutPageJobRequest:
+    return LayoutPageJobRequest(
+        project_uid="project-1",
+        page_uid=f"page-{index}",
+        page_fingerprint=f"fingerprint-{index}",
+        image_hash=f"hash-{index}",
+        page_width=100,
+        page_height=80,
+        filename=f"page-{index}.png",
+        image_bytes=b"image",
+        expected_revision=0,
+        expected_fingerprint=None,
+        source_run_id=source_run_id,
+    )
+
+
 def test_configured_page_workers_consumes_and_bounds_settings(monkeypatch) -> None:
     monkeypatch.setattr(
         workflow,
@@ -45,6 +62,29 @@ def test_configured_page_workers_consumes_and_bounds_settings(monkeypatch) -> No
     assert workflow._configured_page_workers(
         "layout_concurrency", default=8, cap=10, total=1
     ) == 1
+
+
+def test_default_charocr_service_uses_isolated_page_clients(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "get_config",
+        lambda: {
+            "mode": "hanwang",
+            "api_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+            "api_token": "",
+            "api_timeout": 180,
+            "paddle_api_network_mode": "auto",
+        },
+    )
+    service = workflow.WorkflowController()._build_default_ocr_job_service()
+
+    first_prepass, first_vl = service._page_clients()
+    second_prepass, second_vl = service._page_clients()
+
+    assert service.supports_parallel_pages is True
+    assert first_prepass is not second_prepass
+    assert first_vl is not second_vl
+    assert first_prepass._transport is not second_prepass._transport
 
 
 def test_controller_passes_configured_concurrency_to_production_workers(monkeypatch) -> None:
@@ -91,9 +131,15 @@ def test_controller_passes_configured_concurrency_to_production_workers(monkeypa
 
     class LayoutService:
         def prepare_page(self, _session, page_uid, *, expected_revision=0, **_kwargs):
-            return SimpleNamespace(page_uid=page_uid, expected_revision=expected_revision)
+            return SimpleNamespace(
+                page_uid=page_uid,
+                expected_revision=expected_revision,
+                source_run_id=_kwargs.get("source_run_id", ""),
+            )
 
     class OcrService:
+        supports_parallel_pages = True
+
         def prepare_page(self, current_session, page_uid):
             page = current_session.page_repository.get(page_uid)
             layout = current_session.layout_repository.get(page_uid)
@@ -132,10 +178,21 @@ def test_controller_passes_configured_concurrency_to_production_workers(monkeypa
     assert controller.start_layout_analysis() is True
     assert controller._layout_worker is not None
     assert controller._layout_worker._max_workers == 3
+    assert len({request.source_run_id for request in controller._layout_worker._requests}) == 1
 
     assert controller.start_ocr() is True
     assert controller._ocr_worker is not None
     assert controller._ocr_worker._max_workers == 4
+
+    ocr_service.supports_parallel_pages = False
+    serial_controller = workflow.WorkflowController(
+        application=application,
+        layout_analysis_service=layout_service,
+        ocr_job_service=ocr_service,
+    )
+    assert serial_controller.start_ocr() is True
+    assert serial_controller._ocr_worker is not None
+    assert serial_controller._ocr_worker._max_workers == 1
 
 
 def test_layout_worker_executes_pages_concurrently_and_preserves_request_order() -> None:
@@ -150,10 +207,7 @@ def test_layout_worker_executes_pages_concurrently_and_preserves_request_order()
             finally:
                 probe.leave()
 
-    requests = tuple(
-        SimpleNamespace(page_uid=f"page-{index}")
-        for index in range(1, 5)
-    )
+    requests = tuple(_layout_request(index) for index in range(1, 5))
     worker = workflow._LayoutServiceWorker(Service(), requests, max_workers=3)
     committed: list[tuple[str, ...]] = []
     progress: list[tuple[int, int]] = []
@@ -165,6 +219,29 @@ def test_layout_worker_executes_pages_concurrently_and_preserves_request_order()
     assert probe.peak == 3
     assert committed == [("page-1", "page-2", "page-3", "page-4")]
     assert [current for current, _total in progress] == [1, 2, 3, 4]
+
+
+def test_layout_worker_keeps_successes_and_reports_page_failure() -> None:
+    class Service:
+        def execute_page(self, request):
+            if request.page_uid == "page-2":
+                raise RuntimeError("layout failed")
+            return request.page_uid
+
+    worker = workflow._LayoutServiceWorker(
+        Service(),
+        tuple(_layout_request(index) for index in range(1, 4)),
+        max_workers=3,
+    )
+    committed: list[tuple[str, ...]] = []
+    failures: list[object] = []
+    worker.committed.connect(committed.append)
+    worker.page_failed.connect(failures.append)
+
+    worker.run()
+
+    assert [failure.request.page_uid for failure in failures] == ["page-2"]
+    assert committed == [("page-1", "page-3")]
 
 
 def test_ocr_worker_executes_pages_concurrently_and_preserves_request_order() -> None:

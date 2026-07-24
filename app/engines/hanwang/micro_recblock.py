@@ -3581,6 +3581,7 @@ class HanwangMicroRecBlockEngine:
     """Hanwang native adapter with one immutable CharOCR page contract."""
 
     engine_id = "hanwang.micro_recblock"
+    supports_parallel_pages = True
     bbox_space = "page"
 
     def __init__(

@@ -114,3 +114,38 @@ def test_submit_reports_queue_full_after_bounded_retries(monkeypatch) -> None:
 
     assert calls == 3
     assert sleeps == [1.0, 3.0]
+
+
+def test_source_run_id_is_submitted_as_shared_vendor_batch_id(monkeypatch) -> None:
+    submitted: list[dict[str, str]] = []
+    client = PaddleVLClient()
+    monkeypatch.setattr(
+        PaddleVLClient,
+        "_submit_with_queue_retry",
+        lambda _self, _image, *, filename, data: (
+            submitted.append(dict(data)) or {"data": {"jobId": "job-1"}}
+        ),
+    )
+    monkeypatch.setattr(
+        PaddleVLClient,
+        "_wait_for_result",
+        lambda _self, _job_id: ("https://result.test/page.jsonl", {}),
+    )
+    monkeypatch.setattr(
+        PaddleVLClient,
+        "_request",
+        lambda _self, _method, _url, **_kwargs: _Response(
+            200,
+            {},
+            '{"errorCode":0,"result":{"layoutParsingResults":[]}}',
+        ),
+    )
+
+    client.analyze_image_bytes(
+        b"image",
+        filename="page.png",
+        page_uid="page-1",
+        source_run_id="layout-batch-1",
+    )
+
+    assert submitted[0]["batchId"] == "layout-batch-1"

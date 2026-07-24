@@ -142,6 +142,27 @@ def test_layout_analysis_is_page_scoped_and_keeps_raw_vendor_json_append_only(tm
     assert fake.calls[1][2] == "page-2"
 
 
+def test_layout_requests_share_explicit_batch_run_without_sharing_page_identity(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession(ProjectRecord("project-layout-batch"))
+    page_one = _page(session, tmp_path / "one.bin", uid="page-1", page_number=1)
+    page_two = _page(session, tmp_path / "two.bin", uid="page-2", page_number=2)
+    fake = FakePaddle([_response(x=10), _response(x=100)])
+    service = LayoutAnalysisService(fake)
+
+    requests = tuple(
+        service.prepare_page(session, page.uid, source_run_id="layout-batch-1")
+        for page in (page_one, page_two)
+    )
+    results = tuple(service.execute_page(request) for request in requests)
+
+    assert [result.request.page_uid for result in results] == ["page-1", "page-2"]
+    assert {result.request.source_run_id for result in results} == {"layout-batch-1"}
+    assert [call[2] for call in fake.calls] == ["page-1", "page-2"]
+    assert {call[3] for call in fake.calls} == {"layout-batch-1"}
+
+
 def test_real_paddle_inline_formula_detectors_enter_the_same_layout_snapshot() -> None:
     fixture = json.loads(
         Path("tests/fixtures/layout/120166-layout-api-fixture.json").read_text(

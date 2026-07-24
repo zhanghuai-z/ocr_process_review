@@ -161,6 +161,73 @@ class _Engine:
         )
 
 
+def test_parallel_page_capability_requires_isolated_clients_and_safe_engine(monkeypatch) -> None:
+    session = _session()
+    layout = session.layout_repository.get("page-1")
+    routing = PageRoutingPlan(
+        page_uid="page-1",
+        routing_run_uid="routing-1",
+        layout_fingerprint=layout_snapshot_fingerprint(layout),
+        prepass_run_id="prepass-1",
+        blocks=(),
+    )
+    observed_vl_clients: list[object] = []
+    monkeypatch.setattr(
+        module,
+        "acquire_routing_observation_bundle",
+        lambda **kwargs: observed_vl_clients.append(kwargs["vl_client"]) or object(),
+    )
+    monkeypatch.setattr(module, "compile_page_routing_plan", lambda *_args, **_kwargs: routing)
+
+    class ParallelEngine(_Engine):
+        supports_parallel_pages = True
+
+    prepass_clients: list[_Prepass] = []
+    vl_clients: list[object] = []
+
+    def make_prepass() -> _Prepass:
+        client = _Prepass()
+        prepass_clients.append(client)
+        return client
+
+    def make_vl() -> object:
+        client = object()
+        vl_clients.append(client)
+        return client
+
+    isolated = OcrJobService(
+        prepass_client_factory=make_prepass,
+        vl_client_factory=make_vl,
+        engine=ParallelEngine(),
+    )
+    shared = OcrJobService(
+        prepass_client=_Prepass(),
+        vl_client=object(),
+        engine=ParallelEngine(),
+    )
+    unsafe_engine = OcrJobService(
+        prepass_client_factory=make_prepass,
+        vl_client_factory=make_vl,
+        engine=_Engine(),
+    )
+
+    request = isolated.prepare_page(
+        session,
+        "page-1",
+        image_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+    )
+    isolated.execute_page(request)
+    isolated.execute_page(request)
+
+    assert isolated.supports_parallel_pages is True
+    assert shared.supports_parallel_pages is False
+    assert unsafe_engine.supports_parallel_pages is False
+    assert len(prepass_clients) == 2
+    assert len(vl_clients) == 2
+    assert observed_vl_clients == vl_clients
+    assert vl_clients[0] is not vl_clients[1]
+
+
 def test_prepare_page_blocks_old_automatic_layout_missing_inline_formula() -> None:
     session = _session(
         artifact_payload=_inline_formula_payload(),

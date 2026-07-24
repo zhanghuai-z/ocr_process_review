@@ -72,6 +72,20 @@ class LayoutPageJobResult:
     snapshot: LayoutSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class LayoutPageJobFailure:
+    """One failed external layout attempt bound to its immutable request."""
+
+    request: LayoutPageJobRequest
+    message: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, LayoutPageJobRequest):
+            raise TypeError("layout page failure requires its immutable request")
+        if not isinstance(self.message, str) or not self.message.strip():
+            raise ValueError("layout page failure requires a non-empty message")
+
+
 class LayoutAnalysisService:
     """Acquire Paddle facts and adopt them through the session repositories."""
 
@@ -368,6 +382,7 @@ class LayoutAnalysisService:
 
 __all__ = [
     "LayoutAnalysisCommit",
+    "LayoutPageJobFailure",
     "LayoutPageJobRequest",
     "LayoutPageJobResult",
     "LayoutAnalysisService",

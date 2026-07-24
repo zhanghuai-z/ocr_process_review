@@ -119,10 +119,57 @@ def _uid(prefix: str) -> str:
 class OcrJobService:
     """Compile, execute, and atomically adopt one page OCR observation batch."""
 
-    def __init__(self, *, prepass_client, vl_client, engine: CharOcrEngine) -> None:
+    def __init__(
+        self,
+        *,
+        prepass_client=None,
+        vl_client=None,
+        prepass_client_factory: Callable[[], object] | None = None,
+        vl_client_factory: Callable[[], object] | None = None,
+        engine: CharOcrEngine,
+    ) -> None:
+        if prepass_client is not None and prepass_client_factory is not None:
+            raise ValueError("provide prepass_client or prepass_client_factory, not both")
+        if vl_client is not None and vl_client_factory is not None:
+            raise ValueError("provide vl_client or vl_client_factory, not both")
+        if prepass_client is None and prepass_client_factory is None:
+            raise ValueError("OCR requires a PP-OCRv6 prepass client")
+        if vl_client is None and vl_client_factory is None:
+            raise ValueError("OCR requires a Paddle VL observation client")
+        if prepass_client_factory is not None and not callable(prepass_client_factory):
+            raise TypeError("prepass_client_factory must be callable")
+        if vl_client_factory is not None and not callable(vl_client_factory):
+            raise TypeError("vl_client_factory must be callable")
         self._prepass_client = prepass_client
         self._vl_client = vl_client
+        self._prepass_client_factory = prepass_client_factory
+        self._vl_client_factory = vl_client_factory
         self._engine = engine
+
+    @property
+    def supports_parallel_pages(self) -> bool:
+        """Whether each page receives isolated external clients and a safe engine."""
+
+        return bool(
+            self._prepass_client_factory is not None
+            and self._vl_client_factory is not None
+            and getattr(self._engine, "supports_parallel_pages", False)
+        )
+
+    def _page_clients(self) -> tuple[object, object]:
+        prepass = (
+            self._prepass_client_factory()
+            if self._prepass_client_factory is not None
+            else self._prepass_client
+        )
+        vl_client = (
+            self._vl_client_factory()
+            if self._vl_client_factory is not None
+            else self._vl_client
+        )
+        if prepass is None or vl_client is None:
+            raise RuntimeError("OCR page clients are unavailable")
+        return prepass, vl_client
 
     def run_page(
         self,
@@ -199,6 +246,7 @@ class OcrJobService:
         page = job.page
         layout = job.layout
         artifact = job.artifact
+        prepass_client, vl_client = self._page_clients()
         image_bgr = cv2.imdecode(
             np.frombuffer(job.image_bytes, dtype=np.uint8),
             cv2.IMREAD_COLOR,
@@ -207,7 +255,7 @@ class OcrJobService:
             raise ValueError("immutable OCR request image cannot be decoded")
         if progress_callback is not None:
             progress_callback(0, 0, "PP-OCRv6 行框定位")
-        prepass = self._prepass_client.analyze_page(image_bgr, page_uid=page.uid)
+        prepass = prepass_client.analyze_page(image_bgr, page_uid=page.uid)
         if progress_callback is not None:
             progress_callback(0, 0, "PP-OCRv6 行框完成")
         observations = acquire_routing_observation_bundle(
@@ -216,7 +264,7 @@ class OcrJobService:
             artifact=artifact,
             image_bgr=image_bgr,
             prepass=prepass,
-            vl_client=self._vl_client,
+            vl_client=vl_client,
         )
         if progress_callback is not None:
             progress_callback(0, 0, "OCR 路由编译")

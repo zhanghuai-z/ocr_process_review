@@ -685,7 +685,9 @@ class ApiSettingsDialog(QDialog):
         ocr_concurrency_layout.setSpacing(0)
         self._ocr_page_concurrency_spin = QSpinBox()
         self._ocr_page_concurrency_spin.setRange(1, 20)
-        self._ocr_page_concurrency_spin.setToolTip("CharOCR 多页文字识别并发数。")
+        self._ocr_page_concurrency_spin.setToolTip(
+            "CharOCR 页级并发数；默认 2，4 为平衡批处理档，5-20 仅供压力测试。"
+        )
         ocr_concurrency_layout.addWidget(
             _spinbox_with_stepper(self._ocr_page_concurrency_spin, spin_width=62, total_width=90)
         )
