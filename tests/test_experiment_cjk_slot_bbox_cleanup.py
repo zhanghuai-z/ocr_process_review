@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import sqlite3
 
 from scripts.experiment_cjk_slot_bbox_cleanup import (
     _best_vertical_seam,
+    _load_project_observations,
     _slot_x_bounds,
     _tight_foreground_bbox,
 )
@@ -65,3 +67,47 @@ def test_tight_foreground_bbox_keeps_detached_parts_inside_slot() -> None:
     assert bbox == (22, 5, 42, 34)
     assert area == 456
     assert component_count == 2
+
+
+def test_legacy_project_adapter_preserves_page_line_and_char_order() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE page (
+            id INTEGER PRIMARY KEY, uid TEXT, page_number INTEGER,
+            width INTEGER, height INTEGER, cache_image_path TEXT, source_path TEXT
+        );
+        CREATE TABLE block (id INTEGER PRIMARY KEY, page_id INTEGER);
+        CREATE TABLE line (
+            id INTEGER PRIMARY KEY, uid TEXT, block_id INTEGER, text TEXT,
+            x INTEGER, y INTEGER, w INTEGER, h INTEGER
+        );
+        CREATE TABLE char_ (
+            id INTEGER PRIMARY KEY, uid TEXT, line_id INTEGER, char TEXT,
+            x INTEGER, y INTEGER, w INTEGER, h INTEGER,
+            bbox_source TEXT, bbox_granularity TEXT
+        );
+        INSERT INTO page VALUES (1, 'page-a', 1, 100, 80, 'page.png', 'source.png');
+        INSERT INTO block VALUES (2, 1);
+        INSERT INTO line VALUES (3, 'line-a', 2, '民族', 10, 20, 50, 30);
+        INSERT INTO char_ VALUES (
+            5, 'char-2', 3, '族', 35, 20, 20, 30,
+            'hanwang:micro_recblock', 'char'
+        );
+        INSERT INTO char_ VALUES (
+            4, 'char-1', 3, '民', 10, 20, 20, 30,
+            'hanwang:micro_recblock', 'char'
+        );
+        """
+    )
+
+    pages, lines, atoms, schema = _load_project_observations(connection)
+
+    assert schema == "legacy_v1_diagnostic_adapter"
+    assert pages[0]["uid"] == "page-a"
+    assert lines[0]["page_uid"] == "page-a"
+    assert lines[0]["bbox"] == [10, 20, 60, 50]
+    assert [(atom["text"], atom["index"]) for atom in atoms] == [
+        ("民", 0),
+        ("族", 1),
+    ]

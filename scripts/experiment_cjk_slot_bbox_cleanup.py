@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from html import escape
 import json
 from pathlib import Path
 import sqlite3
@@ -227,6 +228,79 @@ def _load_table(connection: sqlite3.Connection, table: str) -> list[dict[str, An
     return [json.loads(row[0]) for row in connection.execute(f"SELECT payload FROM {table}")]
 
 
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def _load_project_observations(
+    connection: sqlite3.Connection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Normalize strict-v2 or legacy rows at this diagnostic input boundary."""
+    if "payload" in _table_columns(connection, "page"):
+        return (
+            _load_table(connection, "page"),
+            _load_table(connection, "ocr_line"),
+            _load_table(connection, "ocr_atom"),
+            "strict_v2",
+        )
+
+    pages = [
+        {
+            "uid": uid,
+            "page_number": page_number,
+            "width": width,
+            "height": height,
+            "cache_image_path": cache_image_path,
+            "source_path": source_path,
+        }
+        for uid, page_number, width, height, cache_image_path, source_path
+        in connection.execute(
+            "SELECT uid, page_number, width, height, cache_image_path, source_path "
+            "FROM page ORDER BY page_number, id"
+        )
+    ]
+    lines = [
+        {
+            "uid": uid,
+            "page_uid": page_uid,
+            "text": text,
+            "bbox": [x, y, x + width, y + height],
+        }
+        for uid, page_uid, text, x, y, width, height
+        in connection.execute(
+            "SELECT l.uid, p.uid, l.text, l.x, l.y, l.w, l.h "
+            "FROM line l JOIN block b ON b.id=l.block_id "
+            "JOIN page p ON p.id=b.page_id ORDER BY p.page_number, l.id"
+        )
+    ]
+    atoms: list[dict[str, Any]] = []
+    current_line_id: int | None = None
+    line_index = 0
+    for row in connection.execute(
+        "SELECT c.id, c.uid, c.line_id, l.uid, c.char, c.x, c.y, c.w, c.h, "
+        "c.bbox_source, c.bbox_granularity "
+        "FROM char_ c JOIN line l ON l.id=c.line_id ORDER BY c.line_id, c.id"
+    ):
+        _id, uid, line_id, line_uid, text, x, y, width, height, source, granularity = row
+        if line_id != current_line_id:
+            current_line_id = int(line_id)
+            line_index = 0
+        bbox = None if x is None or y is None or width is None or height is None else [
+            int(x), int(y), int(x + width), int(y + height)
+        ]
+        atoms.append({
+            "uid": uid,
+            "line_uid": line_uid,
+            "index": line_index,
+            "text": text,
+            "bbox": bbox,
+            "source": source,
+            "granularity": granularity,
+        })
+        line_index += 1
+    return pages, lines, atoms, "legacy_v1_diagnostic_adapter"
+
+
 def _resolve_page_image(project_path: Path, page: dict[str, Any]) -> Path:
     candidates = [
         project_path.parent / str(page.get("cache_image_path") or ""),
@@ -238,103 +312,113 @@ def _resolve_page_image(project_path: Path, page: dict[str, Any]) -> Path:
     raise FileNotFoundError(f"cannot resolve page image for {project_path}")
 
 
-def _records(project_path: Path) -> tuple[list[dict[str, Any]], np.ndarray, Path]:
+def _records(
+    project_path: Path,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, Path],
+    list[dict[str, Any]],
+    str,
+]:
     connection = sqlite3.connect(f"file:{project_path}?mode=ro", uri=True)
     try:
-        pages = _load_table(connection, "page")
-        lines = _load_table(connection, "ocr_line")
-        atoms = _load_table(connection, "ocr_atom")
+        pages, lines, atoms, persistence_schema = _load_project_observations(connection)
     finally:
         connection.close()
-    if len(pages) != 1:
-        raise RuntimeError(f"experiment requires one page, found {len(pages)}")
-    page = pages[0]
-    image_path = _resolve_page_image(project_path, page)
-    image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise RuntimeError(f"cannot read {image_path}")
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    foreground = gray < 128
     atoms_by_line: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for atom in atoms:
         atoms_by_line[str(atom["line_uid"])].append(atom)
-    lines_by_uid = {str(line["uid"]): line for line in lines}
+    lines_by_page: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for line in lines:
+        lines_by_page[str(line["page_uid"])].append(line)
     records: list[dict[str, Any]] = []
-    for line_uid, line_atoms in atoms_by_line.items():
-        line = lines_by_uid.get(line_uid)
-        if line is None:
-            continue
-        ordered = sorted(line_atoms, key=lambda atom: int(atom["index"]))
-        line_bbox = _xyxy(line["bbox"])
-        band = _line_cjk_band(ordered, line_bbox)
-        if band is None:
-            continue
-        for atom in ordered:
-            if not _eligible_cjk_atom(atom):
+    image_paths: dict[str, Path] = {}
+    for page in sorted(pages, key=lambda item: int(item.get("page_number") or 0)):
+        page_uid = str(page["uid"])
+        image_path = _resolve_page_image(project_path, page)
+        image_paths[page_uid] = image_path
+        image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"cannot read {image_path}")
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        foreground = gray < 128
+        for line in lines_by_page.get(page_uid, ()):
+            line_uid = str(line["uid"])
+            line_atoms = atoms_by_line.get(line_uid, ())
+            ordered = sorted(line_atoms, key=lambda atom: int(atom["index"]))
+            line_bbox = _xyxy(line["bbox"])
+            band = _line_cjk_band(ordered, line_bbox)
+            if band is None:
                 continue
-            native_bbox = _xyxy(atom["bbox"])
-            bounds = _slot_x_bounds(
-                ordered,
-                int(atom["index"]),
-                page_width=image.shape[1],
-                foreground=foreground,
-                band=band,
-            )
-            if bounds is None:
-                continue
-            slot_bbox = (bounds[0], band[0], bounds[1], band[1])
-            cleanup_bbox = (
-                max(native_bbox[0], slot_bbox[0]),
-                native_bbox[1],
-                min(native_bbox[2], slot_bbox[2]),
-                native_bbox[3],
-            )
-            proposal, proposal_ink, component_count = _tight_foreground_bbox(
-                foreground, cleanup_bbox
-            )
-            if proposal is None:
-                status = "no_slot_foreground"
-                proposal = native_bbox
-            else:
-                status = "proposed"
-            native_ink = _ink_area(foreground, native_bbox)
-            shared_ink = _ink_area(
-                foreground,
-                (
-                    max(native_bbox[0], proposal[0]),
-                    max(native_bbox[1], proposal[1]),
-                    min(native_bbox[2], proposal[2]),
-                    min(native_bbox[3], proposal[3]),
-                ),
-            ) if _intersection_area(native_bbox, proposal) else 0
-            removed_ink = max(0, native_ink - shared_ink)
-            recovered_ink = max(0, proposal_ink - shared_ink)
-            left_edge, right_edge = _slot_edge_ink(foreground, slot_bbox)
-            records.append({
-                "page_uid": page["uid"],
-                "line_uid": line_uid,
-                "line_text": line.get("text") or "",
-                "atom_uid": atom["uid"],
-                "atom_index": int(atom["index"]),
-                "text": atom["text"],
-                "source": atom["source"],
-                "native_bbox": list(native_bbox),
-                "slot_bbox": list(slot_bbox),
-                "proposal_bbox": list(proposal),
-                "status": status,
-                "native_ink": native_ink,
-                "proposal_ink": proposal_ink,
-                "removed_ink": removed_ink,
-                "removed_ink_ratio": round(removed_ink / max(1, native_ink), 6),
-                "recovered_ink": recovered_ink,
-                "recovered_ink_ratio": round(recovered_ink / max(1, proposal_ink), 6),
-                "slot_component_count": component_count,
-                "slot_left_edge_ink": left_edge,
-                "slot_right_edge_ink": right_edge,
-                "slot_edge_risk": bool(left_edge or right_edge),
-                "seam_search_risk": bool(bounds[2]),
-            })
-    return records, image, image_path
+            for atom in ordered:
+                if not _eligible_cjk_atom(atom):
+                    continue
+                native_bbox = _xyxy(atom["bbox"])
+                bounds = _slot_x_bounds(
+                    ordered,
+                    int(atom["index"]),
+                    page_width=image.shape[1],
+                    foreground=foreground,
+                    band=band,
+                )
+                if bounds is None:
+                    continue
+                slot_bbox = (bounds[0], band[0], bounds[1], band[1])
+                cleanup_bbox = (
+                    max(native_bbox[0], slot_bbox[0]),
+                    native_bbox[1],
+                    min(native_bbox[2], slot_bbox[2]),
+                    native_bbox[3],
+                )
+                proposal, proposal_ink, component_count = _tight_foreground_bbox(
+                    foreground, cleanup_bbox
+                )
+                if proposal is None:
+                    status = "no_slot_foreground"
+                    proposal = native_bbox
+                else:
+                    status = "proposed"
+                native_ink = _ink_area(foreground, native_bbox)
+                shared_ink = _ink_area(
+                    foreground,
+                    (
+                        max(native_bbox[0], proposal[0]),
+                        max(native_bbox[1], proposal[1]),
+                        min(native_bbox[2], proposal[2]),
+                        min(native_bbox[3], proposal[3]),
+                    ),
+                ) if _intersection_area(native_bbox, proposal) else 0
+                removed_ink = max(0, native_ink - shared_ink)
+                recovered_ink = max(0, proposal_ink - shared_ink)
+                left_edge, right_edge = _slot_edge_ink(foreground, slot_bbox)
+                records.append({
+                    "page_uid": page_uid,
+                    "page_number": int(page.get("page_number") or 0),
+                    "page_source": str(page.get("source_path") or image_path.name),
+                    "line_uid": line_uid,
+                    "line_text": line.get("text") or "",
+                    "atom_uid": atom["uid"],
+                    "atom_index": int(atom["index"]),
+                    "text": atom["text"],
+                    "source": atom["source"],
+                    "native_bbox": list(native_bbox),
+                    "slot_bbox": list(slot_bbox),
+                    "proposal_bbox": list(proposal),
+                    "status": status,
+                    "native_ink": native_ink,
+                    "proposal_ink": proposal_ink,
+                    "removed_ink": removed_ink,
+                    "removed_ink_ratio": round(removed_ink / max(1, native_ink), 6),
+                    "recovered_ink": recovered_ink,
+                    "recovered_ink_ratio": round(recovered_ink / max(1, proposal_ink), 6),
+                    "slot_component_count": component_count,
+                    "slot_left_edge_ink": left_edge,
+                    "slot_right_edge_ink": right_edge,
+                    "slot_edge_risk": bool(left_edge or right_edge),
+                    "seam_search_risk": bool(bounds[2]),
+                })
+        del image
+    return records, image_paths, pages, persistence_schema
 
 
 def _fit_crop(
@@ -419,6 +503,74 @@ def _contact_sheet(
     cv2.imencode(".png", np.vstack(rows))[1].tofile(path)
 
 
+def _contact_sheets(
+    image: np.ndarray,
+    records: list[dict[str, Any]],
+    directory: Path,
+    stem: str,
+    *,
+    page_size: int = 80,
+) -> list[Path]:
+    paths: list[Path] = []
+    for offset in range(0, len(records), page_size):
+        path = directory / f"{stem}_{offset // page_size + 1:03d}.png"
+        _contact_sheet(image, records[offset:offset + page_size], path, limit=page_size)
+        paths.append(path)
+    return paths
+
+
+def _write_page_overlay(
+    image: np.ndarray,
+    records: list[dict[str, Any]],
+    path: Path,
+) -> None:
+    overlay = image.copy()
+    thickness = max(1, round(image.shape[1] / 1400))
+    for record in records:
+        native = _xyxy(record["native_bbox"])
+        proposal = _xyxy(record["proposal_bbox"])
+        slot = _xyxy(record["slot_bbox"])
+        cv2.rectangle(
+            overlay,
+            (native[0], native[1]),
+            (native[2] - 1, native[3] - 1),
+            (0, 0, 255),
+            thickness,
+        )
+        cv2.rectangle(
+            overlay,
+            (proposal[0], proposal[1]),
+            (proposal[2] - 1, proposal[3] - 1),
+            (0, 170, 0),
+            thickness,
+        )
+        cv2.line(
+            overlay,
+            (slot[0], slot[1]),
+            (slot[0], slot[3] - 1),
+            (255, 0, 0),
+            thickness,
+        )
+        cv2.line(
+            overlay,
+            (slot[2] - 1, slot[1]),
+            (slot[2] - 1, slot[3] - 1),
+            (255, 0, 0),
+            thickness,
+        )
+    if overlay.shape[1] > 1800:
+        scale = 1800 / overlay.shape[1]
+        overlay = cv2.resize(
+            overlay,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imencode(".png", overlay)[1].tofile(path)
+
+
 def _windows_path(path: Path) -> str:
     text = path.resolve().as_posix()
     if text.startswith("/mnt/d/"):
@@ -426,40 +578,169 @@ def _windows_path(path: Path) -> str:
     return text.replace("/", "\\")
 
 
+def _crossplatform_name(path: str) -> str:
+    return Path(path.replace("\\", "/")).name
+
+
+def _write_html_index(output_dir: Path, summaries: list[dict[str, Any]]) -> Path:
+    def relative(path: str) -> str:
+        return Path(path).resolve().relative_to(output_dir.resolve()).as_posix()
+
+    rows = []
+    for summary in summaries:
+        links = []
+        for label, key in (
+            ("changed", "changed_sheets"),
+            ("empty seam", "empty_seam_sheets"),
+            ("risk", "risk_sheets"),
+        ):
+            paths = summary[key]
+            if paths:
+                links.append(
+                    f"<span>{escape(label)}: "
+                    + " ".join(
+                        f'<a href="{escape(relative(path))}">{index + 1}</a>'
+                        for index, path in enumerate(paths)
+                    )
+                    + "</span>"
+                )
+        overlay = escape(relative(summary["overlay"]))
+        rows.append(
+            "<tr>"
+            f"<td>{summary['page_number']}</td>"
+            f"<td>{escape(_crossplatform_name(summary['source_path']))}</td>"
+            f"<td>{summary['eligible_atoms']}</td>"
+            f"<td>{summary['changed']}</td>"
+            f"<td>{summary['empty_seam_excluded_ink']}</td>"
+            f"<td>{summary['boundary_risk']}</td>"
+            f'<td><a href="{overlay}"><img src="{overlay}" alt="page overlay"></a></td>'
+            f"<td>{'<br>'.join(links) or 'none'}</td>"
+            "</tr>"
+        )
+    html_path = output_dir / "index.html"
+    html_path.write_text(
+        """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CJK bbox cleanup review</title>
+<style>
+body { font-family: sans-serif; margin: 20px; color: #202020; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #bbb; padding: 6px; text-align: left; vertical-align: top; }
+th { position: sticky; top: 0; background: #f5f5f5; }
+img { width: 240px; height: 180px; object-fit: contain; background: white; }
+a { color: #075ea8; }
+span { display: block; white-space: nowrap; }
+</style>
+</head>
+<body>
+<h1>CJK bbox cleanup review</h1>
+<p>Red: native bbox. Green: proposal. Blue: slot boundary. Diagnostic only.</p>
+<table>
+<thead><tr><th>Page</th><th>Source</th><th>CJK</th><th>Changed</th><th>Empty seam</th><th>Risk</th><th>Overlay</th><th>Crop sheets</th></tr></thead>
+<tbody>
+"""
+        + "\n".join(rows)
+        + """
+</tbody>
+</table>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    return html_path
+
+
 def _write_report(
     output_dir: Path,
     project_path: Path,
-    image_path: Path,
-    image: np.ndarray,
+    image_paths: dict[str, Path],
+    pages: list[dict[str, Any]],
     records: list[dict[str, Any]],
+    persistence_schema: str,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "report.json"
-    zu_sheet = output_dir / "zu_native_vs_slot_cleanup.png"
-    ranked_sheet = output_dir / "highest_removed_ink.png"
-    risky_sheet = output_dir / "slot_edge_risk.png"
-    empty_seam_sheet = output_dir / "empty_seam_excluded_ink.png"
-    ranked = sorted(records, key=lambda item: float(item["removed_ink_ratio"]), reverse=True)
-    zu = [record for record in records if record["text"] == "族"]
-    risky = [record for record in ranked if record["slot_edge_risk"]]
-    empty_seam = [
-        record
-        for record in ranked
-        if record["removed_ink"] > 0
-        and not record["slot_edge_risk"]
-        and not record["seam_search_risk"]
-    ]
-    _contact_sheet(image, zu, zu_sheet)
-    _contact_sheet(image, ranked, ranked_sheet)
-    _contact_sheet(image, risky, risky_sheet)
-    _contact_sheet(image, empty_seam, empty_seam_sheet)
+    records_by_page: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        records_by_page[str(record["page_uid"])].append(record)
+    page_summaries: list[dict[str, Any]] = []
+    for page in sorted(pages, key=lambda item: int(item.get("page_number") or 0)):
+        page_uid = str(page["uid"])
+        page_records = records_by_page.get(page_uid, [])
+        ranked = sorted(
+            page_records,
+            key=lambda item: float(item["removed_ink_ratio"]),
+            reverse=True,
+        )
+        changed = [
+            record
+            for record in ranked
+            if record["proposal_bbox"] != record["native_bbox"]
+        ]
+        empty_seam = [
+            record
+            for record in ranked
+            if record["removed_ink"] > 0
+            and not record["slot_edge_risk"]
+            and not record["seam_search_risk"]
+        ]
+        risky = [
+            record
+            for record in ranked
+            if record["slot_edge_risk"] or record["seam_search_risk"]
+        ]
+        source_stem = Path(
+            str(page.get("source_path") or page_uid).replace("\\", "/")
+        ).stem
+        page_dir = output_dir / "pages" / (
+            f"page_{int(page.get('page_number') or 0):04d}_{source_stem}"
+        )
+        page_dir.mkdir(parents=True, exist_ok=True)
+        image_path = image_paths[page_uid]
+        image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"cannot read {image_path}")
+        overlay_path = page_dir / "changed_overlay.png"
+        _write_page_overlay(image, changed, overlay_path)
+        changed_sheets = _contact_sheets(image, changed, page_dir, "changed")
+        empty_sheets = _contact_sheets(
+            image, empty_seam, page_dir, "empty_seam_excluded_ink"
+        )
+        risk_sheets = _contact_sheets(image, risky, page_dir, "boundary_risk")
+        del image
+        summary = {
+            "page_uid": page_uid,
+            "page_number": int(page.get("page_number") or 0),
+            "source_path": str(page.get("source_path") or ""),
+            "image_path": str(image_path.resolve()),
+            "eligible_atoms": len(page_records),
+            "changed": len(changed),
+            "excluded_native_ink": sum(record["removed_ink"] > 0 for record in page_records),
+            "empty_seam_excluded_ink": len(empty_seam),
+            "boundary_risk": len(risky),
+            "output_dir": str(page_dir.resolve()),
+            "overlay": str(overlay_path.resolve()),
+            "changed_sheets": [str(path.resolve()) for path in changed_sheets],
+            "empty_seam_sheets": [str(path.resolve()) for path in empty_sheets],
+            "risk_sheets": [str(path.resolve()) for path in risk_sheets],
+        }
+        (page_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        page_summaries.append(summary)
+    html_path = _write_html_index(output_dir, page_summaries)
     payload = {
-        "schema": "cjk_slot_bbox_cleanup_experiment.v1",
+        "schema": "cjk_slot_bbox_cleanup_experiment.v2",
         "diagnostic_only": True,
         "project": str(project_path.resolve()),
-        "image": str(image_path.resolve()),
+        "persistence_input": persistence_schema,
+        "page_count": len(pages),
         "record_count": len(records),
         "status": dict(Counter(record["status"] for record in records)),
+        "pages": page_summaries,
         "records": records,
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -470,6 +751,18 @@ def _write_report(
     ]
     removal = [record for record in proposed if record["removed_ink"] > 0]
     recovery = [record for record in proposed if record["recovered_ink"] > 0]
+    risky = [
+        record
+        for record in proposed
+        if record["slot_edge_risk"] or record["seam_search_risk"]
+    ]
+    empty_seam = [
+        record
+        for record in proposed
+        if record["removed_ink"] > 0
+        and not record["slot_edge_risk"]
+        and not record["seam_search_risk"]
+    ]
     lines = [
         "# CJK Slot Bbox Cleanup Experiment",
         "",
@@ -478,7 +771,8 @@ def _write_report(
         "## Scope",
         "",
         f"- project: `{_windows_path(project_path)}`",
-        f"- page image: `{_windows_path(image_path)}`",
+        f"- persistence input: `{persistence_schema}`",
+        f"- pages: {len(pages)}",
         f"- eligible persisted LineCut CJK atoms: {len(records)}",
         f"- proposals: {len(proposed)}",
         f"- bbox changed: {len(changed)}",
@@ -489,25 +783,28 @@ def _write_report(
         f"- excluded ink beyond an empty seam: {len(empty_seam)}",
         f"- status: `{dict(Counter(record['status'] for record in records))}`",
         "",
-        "## Zu Cohort",
+        "## Page Review Index",
         "",
-        f"- occurrences: {len(zu)}",
-        f"- changed: {sum(record['proposal_bbox'] != record['native_bbox'] for record in zu)}",
-        f"- excluded native ink: {sum(record['removed_ink'] > 0 for record in zu)}",
-        f"- recovered slot ink: {sum(record['recovered_ink'] > 0 for record in zu)}",
-        f"- slot-edge risk: {sum(record['slot_edge_risk'] for record in zu)}",
-        f"- excluded ink beyond an empty seam: {sum(record in empty_seam for record in zu)}",
+        "| page | source | CJK atoms | changed | empty-seam ink | boundary risk | review directory |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for summary in page_summaries:
+        lines.append(
+            f"| {summary['page_number']} | `{_crossplatform_name(summary['source_path'])}` | "
+            f"{summary['eligible_atoms']} | {summary['changed']} | "
+            f"{summary['empty_seam_excluded_ink']} | {summary['boundary_risk']} | "
+            f"`{_windows_path(Path(summary['output_dir']))}` |"
+        )
+    lines.extend([
         "",
         "## Outputs",
         "",
         f"- JSON: `{_windows_path(json_path)}`",
-        f"- 族 comparison: `{_windows_path(zu_sheet)}`",
-        f"- highest excluded ink: `{_windows_path(ranked_sheet)}`",
-        f"- slot-edge risk: `{_windows_path(risky_sheet)}`",
-        f"- excluded ink beyond an empty seam: `{_windows_path(empty_seam_sheet)}`",
+        f"- per-page review root: `{_windows_path(output_dir / 'pages')}`",
+        f"- HTML review index: `{_windows_path(html_path)}`",
         "",
-        "Each row is native crop, slot-clean proposal crop, then context. Context colors are red native bbox, blue ownership slot, and green proposed bbox.",
-    ]
+        "Each page directory contains a full-page changed overlay, paginated changed crops, empty-seam candidates, boundary-risk crops, and summary.json. Each crop row is native, proposal, then context; context colors are red native bbox, blue ownership slot, and green proposal.",
+    ])
     (output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -524,8 +821,15 @@ def main() -> int:
         default=ROOT / "debug/cjk_slot_bbox_cleanup_0724test_20260724",
     )
     args = parser.parse_args()
-    records, image, image_path = _records(args.project)
-    _write_report(args.output_dir, args.project, image_path, image, records)
+    records, image_paths, pages, persistence_schema = _records(args.project)
+    _write_report(
+        args.output_dir,
+        args.project,
+        image_paths,
+        pages,
+        records,
+        persistence_schema,
+    )
     print(args.output_dir / "report.md")
     return 0
 

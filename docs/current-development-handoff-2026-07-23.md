@@ -94,6 +94,7 @@ python -m pytest -q
 - 2026-07-24 字符框碎片质量实验已纠正口径：最初“把完整 owned component 归给主字符框、其余框视为外来碎片”的 v1 指标并不等价于矩形裁片切断墨迹，原 27 个候选和比例结论已作废。v2 直接测量字符矩形竖边是否切穿同一连通墨迹，已知目标和 3 个正常对照的受切字符比例都接近或等于 `1.0`，说明切穿事实普遍存在、单独使用会饱和。v3 再统计每个字符裁片中主墨迹之外的小连通组件，并为 `i/j` 允许一个合理上点；该指标在 4 个已知坏框上均为 `0`，因为视觉碎片仍与主墨迹连通，也不能解释目标退化。当前脚本保留三类测量供回显核查，但没有可进入生产的碎片阈值。
 - 已从原始 PP JSON 与回放确认：`T00031_00.jpg` 的 PP word 是 `goubmieibsout`，bbox 为 `[942,1747,1263,1795]`，后处理 route 扩为 `[926,1746,1286,1809]`；扩出的右侧前景被 EngCut 识别为额外 `]`，产生 `goubmieibsout]`。相邻右引号 `”` 在 PP 中是独立 word，`[`/左引号属于周边行上下文。现有 `symbol_conflicts` 只覆盖已配对的相邻 PP symbol，未标出这个越界样例；这是诊断覆盖缺口，不是字符碎片退级证据。
 - 2026-07-24 CJK 字框清理实验：`scripts/experiment_cjk_slot_bbox_cleanup.py` 只读 `file/0724test/test1.ocrproj` 中持久化的 LineCut atom，不改变文本、顺序、项目或 Proof。被导入的源图是纯 `0/255` 二值图。首轮“字符中心中点槽 + 槽内全前景”会让 560 个 CJK atom 全部改框并从原框外吸入墨迹，已否决。保守版只在相邻可见 atom 中心之间搜索纵向投影空谷，并且候选 bbox 只能在原 LineCut bbox 内收缩：560 个 CJK atom 中 64 个排除原框边缘墨迹，其中 58 个位于不穿墨的空谷之外；39 个样例的槽边仍有墨迹、4 个样例搜索区没有空谷，均只标风险。26 个 `族` 中 5 个属于空谷外多余墨迹，另有 2 个涉及槽边风险。该结果证明部分 LineCut 原 bbox 可被前景空谷保守清理，也证明粗体、连笔和边界无空谷样例不能统一收紧；尚未形成生产接受阈值。
+- 同一 CJK 实验已扩到 `file/2/temp/68_page.ocrproj` 的全部 68 页。该项目仍是旧 `page/block/line/char_` 表结构；脚本通过只读、仅诊断的 `legacy_v1_diagnostic_adapter` 按显式 `bbox_source=hanwang:micro_recblock` 归一化输入，没有修改生产持久化或迁移器。32,846 个可测 CJK atom 中 9,200 个候选 bbox 发生变化，但只有 159 个实际排除黑色墨迹，118 个属于空谷外墨迹；2,289 个存在槽边墨迹风险，45 个搜索区没有空谷。绝大多数“变化”只是收紧原 bbox 内空白，不得等同于质量修复。逐页 overlay、分页裁片、风险分册、JSON 摘要和 HTML 索引已经生成，人工副作用审查尚未完成。
 - 尚未实施：没有修改 OCR 路由、EngCut 退级、atom 文本/几何、Proof 或持久化。生产实现前仍需获得可区分目标碎框与正常字框的判据，并单独研究独立标点所有权。
 
 完整 JSON 和四联回显图位于 `D:\project\ocr_process\worktrees\coord\debug\italic_token_fallback_study_20260723`；该目录是诊断产物，不是生产依赖或权威事实。
@@ -103,6 +104,8 @@ python -m pytest -q
 字符框碎片质量 JSON、目标/对照热图、候选回显和 `T00031` 的 PP/route/native 专项图位于 `D:\project\ocr_process\worktrees\coord\debug\latin_charbox_fragment_quality_20260724`，只属于诊断证据；报告 schema v3 明确废弃 v1/v2 的候选解释。
 
 CJK 字框清理 JSON、`族` 对照、空谷候选和边界风险回显位于 `D:\project\ocr_process\worktrees\coord\debug\cjk_slot_bbox_cleanup_0724test_20260724`，只属于诊断投影，不是新的 atom 几何真值。
+
+68 页 CJK 扩面报告和人工审查入口位于 `D:\project\ocr_process\worktrees\coord\debug\cjk_slot_bbox_cleanup_68pages_20260724`；`index.html` 按页链接 full-page overlay、全部 changed 裁片、空谷候选和风险分册。
 
 ## 校对心智
 
