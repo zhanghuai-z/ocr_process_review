@@ -103,7 +103,7 @@ class ProofAtomView:
     atom_index: int
     text: str
     confidence: float
-    bbox: BBox
+    bbox: BBox | None
     source: str
     granularity: str
     token_text: str
@@ -125,7 +125,11 @@ class ProofAtomView:
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
             raise TypeError("confidence must be a number")
         object.__setattr__(self, "confidence", float(self.confidence))
-        object.__setattr__(self, "bbox", _bbox(self.bbox))
+        object.__setattr__(
+            self,
+            "bbox",
+            None if self.bbox is None else _bbox(self.bbox),
+        )
         if not isinstance(self.source, str):
             raise TypeError("source must be str")
         if not isinstance(self.granularity, str) or not self.granularity:

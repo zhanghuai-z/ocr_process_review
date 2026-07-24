@@ -18,11 +18,42 @@ from app.application.proof_workspace import (
     ProofWorkspaceView,
 )
 from app.application.contracts import ProofEditCommand
+from app.ui.proof.confidence_view import ProofCharView
+from app.ui.proof.v_proof import _proofable_entries
 
 
 @pytest.fixture(scope="module")
 def qapp() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+def test_vertical_index_excludes_whitespace_occurrences() -> None:
+    def entry(text: str, index: int) -> ProofCharView:
+        return ProofCharView(
+            proof_uid="proof-1",
+            text_unit_uid="unit-1",
+            char_index=index,
+            char_end=index + 1,
+            text=text,
+            page_uid="page-1",
+            page_number=1,
+            image_path="page.png",
+            line_uid="line-1",
+            region_uid="region-1",
+            atom_uid=None,
+            atom_index=None,
+            bbox=None,
+            confidence=None,
+            ocr_char=None,
+            available=False,
+        )
+
+    assert tuple(item.text for item in _proofable_entries([
+        entry("甲", 0),
+        entry(" ", 1),
+        entry("\t", 2),
+        entry("A", 3),
+    ])) == ("甲", "A")
 
 
 def _workspace(tmp_path: Path) -> ProofWorkspaceView:

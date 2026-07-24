@@ -119,6 +119,7 @@ def build_ocr_workspace_view(session: ProjectSession) -> OcrWorkspaceView:
                     (ocr.get_atom(atom_uid) for atom_uid in line.atom_uids),
                     key=lambda item: (item.index, item.uid),
                 )
+                if atom.bbox is not None and not atom.text.isspace()
             )
             lines_by_region.setdefault(line.region_uid, []).append(
                 OcrLineView(

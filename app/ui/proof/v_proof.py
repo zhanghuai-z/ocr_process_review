@@ -77,6 +77,14 @@ from app.ui.widgets.effects import apply_soft_shadow
 from app.ui.widgets.image_viewer import ImageViewer
 
 
+def _proofable_entries(
+    entries: list[ProofCharView] | tuple[ProofCharView, ...],
+) -> tuple[ProofCharView, ...]:
+    """Return visible text occurrences that can form VProof buckets."""
+
+    return tuple(entry for entry in entries if not entry.text.isspace())
+
+
 IMAGE_SIZE = QSize(620, 420)
 _ICON_PENDING_ROLE = Qt.ItemDataRole.UserRole + 2
 # Gallery cells mirror the mature delegate: a 56px thumbnail with breathing
@@ -643,7 +651,7 @@ class VProofPanel(QWidget):
         restore_keys: tuple[tuple[str, str, int, int, str | None], ...] = (),
     ) -> None:
         self._entries = tuple(sorted(
-            entries,
+            _proofable_entries(entries),
             key=lambda item: (
                 item.page_number,
                 item.proof_uid,

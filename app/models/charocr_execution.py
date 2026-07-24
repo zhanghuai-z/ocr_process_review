@@ -107,12 +107,22 @@ class CharOcrCandidateObservation:
 @dataclass(frozen=True, slots=True)
 class CharOcrAtomObservation:
     text: str
-    bbox: XYXY
+    bbox: XYXY | None
     confidence: float
     source: str
     granularity: str = "char"
     token_text: str = ""
     candidates: tuple[CharOcrCandidateObservation, ...] = ()
+
+    def __post_init__(self) -> None:
+        granularity = self.granularity.strip().lower()
+        if granularity == "space":
+            if not self.text or not self.text.isspace():
+                raise ValueError("space OCR atoms must contain only whitespace")
+            if self.bbox is not None:
+                raise ValueError("space OCR atoms must not carry glyph geometry")
+        elif self.bbox is None:
+            raise ValueError("non-space OCR atoms require geometry")
 
 
 @dataclass(frozen=True, slots=True)

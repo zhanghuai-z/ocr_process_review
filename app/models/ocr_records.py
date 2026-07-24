@@ -235,7 +235,7 @@ class OcrAtom:
     line_uid: str
     index: int
     text: str
-    bbox: XYXY
+    bbox: XYXY | None
     confidence: float
     source: str
     granularity: str
@@ -253,11 +253,18 @@ class OcrAtom:
         if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
             raise ValueError("index must be a non-negative integer")
         _text(self.text, "text")
-        object.__setattr__(self, "bbox", _bbox(self.bbox))
+        granularity = _required_text(self.granularity, "granularity").strip().lower()
+        if granularity == "space":
+            if not self.text or not self.text.isspace():
+                raise ValueError("space OCR atoms must contain only whitespace")
+            # Current producers persist no space geometry. A bbox remains readable
+            # only for project files written before that contract was introduced.
+            object.__setattr__(self, "bbox", _optional_bbox(self.bbox))
+        else:
+            object.__setattr__(self, "bbox", _bbox(self.bbox))
         object.__setattr__(self, "confidence", _confidence(self.confidence))
         object.__setattr__(self, "candidate_uids", _uid_tuple(self.candidate_uids, "candidate_uids"))
         _required_text(self.source, "source")
-        _required_text(self.granularity, "granularity")
         _text(self.token_text, "token_text")
         _text(self.source_fingerprint, "source_fingerprint")
         _set_fingerprint(self)

@@ -3408,9 +3408,9 @@ def _native_line_observation(line: _NativeLineResult) -> CharOcrLineObservation:
         CharOcrAtomObservation(
             text=atom.text,
             bbox=(
-                atom.bbox
-                if _has_geometry(atom.bbox)
-                else line.bbox
+                None
+                if atom.bbox_granularity == "space"
+                else atom.bbox
             ),
             confidence=atom.confidence,
             source=atom.source,

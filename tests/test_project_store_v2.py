@@ -364,7 +364,63 @@ def test_new_project_session_roundtrip_persists_every_new_record_family(tmp_path
         generation = connection.execute(
             "SELECT generation FROM project_format WHERE singleton = 1"
         ).fetchone()[0]
-    assert generation == FORMAT_GENERATION
+        assert generation == FORMAT_GENERATION
+
+
+def test_space_atom_without_geometry_roundtrips(tmp_path: Path) -> None:
+    project_uid = "project-space"
+    session = ProjectSession(ProjectRecord(project_uid, "Space"))
+    session.page_repository.put(_page(project_uid), expected_revision=0)
+    ocr = session.ocr_observation_repository
+    run = ocr.append_run(OcrRun(
+        project_uid=project_uid,
+        uid="run-space",
+        engine="ocr-engine",
+        layout_fingerprint="layout",
+        input_fingerprint="input",
+    ))
+    region = ocr.append_region(OcrRegion(
+        project_uid=project_uid,
+        uid="region-space",
+        run_uid=run.uid,
+        page_uid="page-1",
+        bbox=(1, 2, 31, 42),
+        kind="text",
+    ))
+    line = ocr.append_line(OcrLine(
+        project_uid=project_uid,
+        uid="line-space",
+        run_uid=run.uid,
+        region_uid=region.uid,
+        page_uid="page-1",
+        text=" ",
+        bbox=(1, 2, 31, 12),
+        confidence=0.0,
+        atom_uids=("atom-space",),
+    ))
+    ocr.append_atom(OcrAtom(
+        project_uid=project_uid,
+        uid="atom-space",
+        run_uid=run.uid,
+        region_uid=region.uid,
+        line_uid=line.uid,
+        index=0,
+        text=" ",
+        bbox=None,
+        confidence=0.0,
+        source="hanwang:EngCut:latin_route",
+        granularity="space",
+        token_text=" ",
+    ))
+    path = tmp_path / "space.ocrproj"
+
+    save_session(path, session)
+    loaded = load_session(path, expected_project_uid=project_uid)
+
+    atom = loaded.ocr_observation_repository.get_atom("atom-space")
+    assert atom.text == " "
+    assert atom.bbox is None
+    assert atom.granularity == "space"
 
 
 def _invalid_sqlite(path: Path, kind: str) -> None:

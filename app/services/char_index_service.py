@@ -96,6 +96,29 @@ class CharIndexService:
                     )
                     continue
                 atom = atom_span.atom
+                if text.isspace():
+                    entries.append(
+                        CharIndexEntry(
+                            proof_uid=state.uid,
+                            text_unit_uid=unit.uid,
+                            char_index=offset,
+                            text=text,
+                            page_uid=page.uid,
+                            page_number=page.page_number,
+                            image_path=page.image_path,
+                            scope_uid=batch.scope_uid,
+                            batch_uid=batch.uid,
+                            line_uid=atom_span.line.uid,
+                            atom_uid=atom.uid,
+                            atom_index=atom.index,
+                            bbox=None,
+                            geometry_status=GEOMETRY_UNAVAILABLE,
+                            unavailable_reason="whitespace_has_no_glyph_geometry",
+                            line_order=atom_span.line.order,
+                            atom_fingerprint=atom.fingerprint,
+                        )
+                    )
+                    continue
                 entries.append(
                     CharIndexEntry(
                         proof_uid=state.uid,

@@ -555,7 +555,7 @@ def _row_image_bbox(
     placements: tuple[_AtomPlacement, ...],
     formula_number_line: ProofLineView | None = None,
 ) -> tuple[int, int, int, int] | None:
-    boxes = [item.atom.bbox for item in placements]
+    boxes = [item.atom.bbox for item in placements if item.atom.bbox is not None]
     if line.bbox is not None:
         boxes.insert(0, line.bbox)
     if formula_number_line is not None and formula_number_line.bbox is not None:
@@ -2853,7 +2853,7 @@ class _ProofRowWidget(QFrame):
             if self.row.kind != "text" and _atom_kind(placement.atom) is not None:
                 continue
             indices = placement.char_indices
-            if not indices:
+            if not indices or placement.atom.bbox is None:
                 continue
             atom_left, atom_top, atom_right, atom_bottom = placement.atom.bbox
             left, _top, right, _bottom = rotate_bbox(

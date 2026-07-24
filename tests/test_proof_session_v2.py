@@ -25,6 +25,7 @@ from app.models.proof_records import (
     ProofTextUnit,
 )
 from app.core.proof_session import ProofSpanReplacement
+from app.services.char_index_service import CharIndexService
 from app.services.proof_session_service import ProofSessionService
 
 
@@ -483,6 +484,77 @@ def test_index_uses_proof_alignment_and_atom_geometry_only() -> None:
     assert unavailable[0].bbox is None
     assert unavailable[0].unavailable_reason == "no_alignment_for_proof_position"
     assert service.same_text(initial.uid, "c")[0].atom_uid == "atom-2"
+
+
+def test_index_keeps_whitespace_text_but_marks_its_geometry_unavailable() -> None:
+    session, initial = _session()
+    ocr = session.ocr_observation_repository
+    page = session.page_repository.get("page-1")
+    original_batch = ocr.get_batch("batch-1")
+    original_line = ocr.get_line("line-1")
+    atom_a = ocr.get_atom("atom-1")
+    atom_b = replace(ocr.get_atom("atom-2"), index=2)
+    space = OcrAtom(
+        project_uid=initial.project_uid,
+        uid="atom-space",
+        run_uid=atom_a.run_uid,
+        region_uid=atom_a.region_uid,
+        line_uid=original_line.uid,
+        index=1,
+        text=" ",
+        bbox=original_line.bbox,
+        confidence=0.0,
+        source="hanwang:EngCut:latin_route",
+        granularity="space",
+        token_text=" ",
+    )
+    line = replace(
+        original_line,
+        text="a b",
+        atom_uids=(atom_a.uid, space.uid, atom_b.uid),
+    )
+    batch = replace(
+        original_batch,
+        atom_uids=(atom_a.uid, space.uid, atom_b.uid),
+    )
+    unit = replace(initial.text_units[0], text="a b")
+    segment = replace(
+        initial.alignment_segments[0],
+        source_end=3,
+        proof_end=3,
+    )
+    alignment = replace(
+        initial.alignment_slices[0],
+        source_end=3,
+        proof_end=3,
+        source_text="a b",
+        proof_text="a b",
+    )
+    state = replace(
+        initial,
+        anchor_snapshot=replace(
+            initial.anchor_snapshot,
+            source_fingerprint=batch.fingerprint,
+        ),
+        text_units=(unit,),
+        alignment_segments=(segment,),
+        alignment_slices=(alignment,),
+    )
+
+    index = CharIndexService().build(
+        page=page,
+        batch=batch,
+        lines=(line,),
+        atoms=(atom_a, space, atom_b),
+        state=state,
+    )
+
+    whitespace = index.query(" ", include_unavailable=True)
+    assert len(whitespace) == 1
+    assert whitespace[0].bbox is None
+    assert whitespace[0].geometry_status == GEOMETRY_UNAVAILABLE
+    assert whitespace[0].unavailable_reason == "whitespace_has_no_glyph_geometry"
+    assert "".join(entry.text for entry in index.entries) == "a b"
 
 
 def test_rebind_is_an_aggregate_replace_and_invalidates_alignment_until_rebound() -> None:

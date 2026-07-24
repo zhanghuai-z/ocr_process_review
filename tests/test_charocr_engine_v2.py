@@ -243,6 +243,50 @@ def test_native_text_only_candidate_defaults_to_zero_confidence() -> None:
     assert line.atoms[0].candidates[0].confidence == 0.0
 
 
+def test_native_space_atom_keeps_missing_glyph_geometry() -> None:
+    import app.engines.hanwang.micro_recblock as module
+
+    line = module._native_line_observation(module._NativeLineResult(
+        text="a b",
+        bbox=(5, 5, 45, 25),
+        chars=[
+            module._NativeAtomResult(
+                text=" ",
+                confidence=0.0,
+                bbox=None,
+                source="hanwang:EngCut:latin_route",
+                bbox_granularity="space",
+            ),
+        ],
+    ))
+
+    assert line.atoms[0].text == " "
+    assert line.atoms[0].bbox is None
+    assert line.atoms[0].granularity == "space"
+
+
+def test_non_space_observation_rejects_missing_geometry() -> None:
+    with pytest.raises(ValueError, match="non-space OCR atoms require geometry"):
+        CharOcrAtomObservation(
+            text="a",
+            bbox=None,
+            confidence=0.0,
+            source="test",
+            granularity="char",
+        )
+
+
+def test_space_observation_rejects_legacy_line_geometry() -> None:
+    with pytest.raises(ValueError, match="space OCR atoms must not carry glyph geometry"):
+        CharOcrAtomObservation(
+            text=" ",
+            bbox=(0, 0, 20, 10),
+            confidence=0.0,
+            source="test",
+            granularity="space",
+        )
+
+
 def test_hanwang_engine_has_no_legacy_model_or_page_write_entry() -> None:
     import app.engines.hanwang.micro_recblock as module
 

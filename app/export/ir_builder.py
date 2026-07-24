@@ -405,7 +405,11 @@ def _char_payloads(page_snapshot: ExportPageSnapshot, line: OcrLine) -> list[dic
             candidate_by_atom.setdefault(candidate.atom_uid, []).append(candidate)
 
     atoms = _atoms_for_line(line, atom_by_uid)
-    return [_char_payload(atom, candidate_by_atom.get(atom.uid, [])) for atom in atoms]
+    return [
+        _char_payload(atom, candidate_by_atom.get(atom.uid, []))
+        for atom in atoms
+        if atom.bbox is not None and not atom.text.isspace()
+    ]
 
 
 def _atoms_for_line(
