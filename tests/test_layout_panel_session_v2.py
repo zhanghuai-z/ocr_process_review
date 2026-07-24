@@ -5,7 +5,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from app.application.contracts import (
@@ -25,7 +26,7 @@ from app.models.project_session import PageRecord
 from app.services.layout_overlay_service import LayoutOverlayService
 from app.ui.recognize.layout_panel import LayoutPanel
 from app.ui.recognize.ocr_panel import OcrPanel
-from app.ui.widgets.image_viewer import ImageViewer, OcrAtomBox
+from app.ui.widgets.image_viewer import BBoxItem, ImageViewer, OcrAtomBox
 
 
 def _qt_app() -> QApplication:
@@ -311,6 +312,27 @@ def test_image_viewer_consumes_view_blocks_and_atom_boxes_immutably(tmp_path: Pa
     assert viewer._block_items[0][0]._block_view is page_view.blocks[0]
     assert viewer._atom_items[0][0]._atom_box is atom
     assert viewer._atom_items[0][0].is_editable() is False
+
+
+def test_bbox_item_coalesces_drag_geometry_until_release(tmp_path: Path) -> None:
+    _qt_app()
+    page_view = PageView.from_records(_page(tmp_path / "page.png"), _snapshot(_artifact()))
+    item = BBoxItem(
+        QRectF(0, 0, page_view.blocks[0].bbox.w, page_view.blocks[0].bbox.h),
+        color=QColor("#ff0000"),
+    )
+    item.set_block(page_view.blocks[0])
+    emitted: list[tuple[str, BBox]] = []
+    item.signals.geometry_changed.connect(lambda uid, bbox: emitted.append((uid, bbox)))
+
+    first = BBox.from_xyxy(10, 10, 130, 60)
+    final = BBox.from_xyxy(20, 20, 150, 80)
+    item._queue_geometry_changed(first)
+    item._queue_geometry_changed(final)
+
+    assert emitted == []
+    item._flush_geometry_changed()
+    assert emitted == [("block-1", final)]
 
 
 def test_ocr_panel_consumes_ocr_workspace_without_legacy_entrypoints(tmp_path: Path) -> None:

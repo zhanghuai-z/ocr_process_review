@@ -207,7 +207,7 @@ class _ResizeHandle(QGraphicsRectItem):
                 h.update_position()
         finally:
             bi._suppress_geometry_emit = False
-        bi._emit_geometry_changed(BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height())))
+        bi._queue_geometry_changed(BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height())))
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -216,6 +216,7 @@ class _ResizeHandle(QGraphicsRectItem):
         self._bbox_item._end_geometry_edit()
         self._bbox_item._edit_started_for_drag = False
         event.accept()
+        self._bbox_item._flush_geometry_changed()
 
 
 # ── BBoxItem ──────────────────────────────────────────────────
@@ -261,6 +262,7 @@ class BBoxItem(QGraphicsRectItem):
         self._stroke_occlusions: tuple[QRectF, ...] = ()
         self._stroke_clip_path: Optional[QPainterPath] = None
         self._edit_started_for_drag = False
+        self._pending_geometry_bbox: Optional[BBox] = None
         self._suppress_geometry_emit = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
@@ -389,8 +391,8 @@ class BBoxItem(QGraphicsRectItem):
             self._emit_edit_started_once()
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._update_tooltip()
-            if not self._suppress_geometry_emit:
-                self._emit_geometry_changed(self._scene_bbox())
+            if not self._suppress_geometry_emit and self._edit_started_for_drag:
+                self._queue_geometry_changed(self._scene_bbox())
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # 选中时显示手柄，取消选中时隐藏
             editable = bool(self.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
@@ -408,6 +410,7 @@ class BBoxItem(QGraphicsRectItem):
         self._end_geometry_edit()
         self._edit_started_for_drag = False
         super().mouseReleaseEvent(event)
+        self._flush_geometry_changed()
 
     def _emit_edit_started_once(self) -> None:
         if not self._editable or not self._selectable or self._block_view is None or self._edit_started_for_drag:
@@ -442,6 +445,15 @@ class BBoxItem(QGraphicsRectItem):
             return
         if self._atom_box is not None:
             self.signals.atom_geometry_changed.emit(self._atom_box.uid, bbox)
+
+    def _queue_geometry_changed(self, bbox: BBox) -> None:
+        self._pending_geometry_bbox = bbox
+
+    def _flush_geometry_changed(self) -> None:
+        bbox = self._pending_geometry_bbox
+        self._pending_geometry_bbox = None
+        if bbox is not None:
+            self._emit_geometry_changed(bbox)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()

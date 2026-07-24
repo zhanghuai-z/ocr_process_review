@@ -200,6 +200,22 @@ def test_real_paddle_inline_formula_detectors_enter_the_same_layout_snapshot() -
     assert inline_blocks[0].origin.raw_json_path.endswith("layout_det_res.boxes[10]")
 
 
+def test_abstract_layout_label_is_routed_as_text_ocr() -> None:
+    snapshot = LayoutAnalyzer().analyze(
+        _response(label="abstract"),
+        page_uid="page-abstract",
+        page_width=200,
+        page_height=300,
+        artifact_uid="artifact-abstract",
+        source_run_id="layout-abstract",
+    )
+
+    assert len(snapshot.blocks) == 1
+    assert snapshot.blocks[0].source_label == "abstract"
+    assert snapshot.blocks[0].block_type is BlockType.TEXT
+    assert snapshot.blocks[0].ocr_policy is OcrPolicy.TEXT_OCR
+
+
 def test_inline_formula_parent_text_requires_an_exact_per_parent_count() -> None:
     response = _response()
     pruned = response["result"]["layoutParsingResults"][0]["prunedResult"]

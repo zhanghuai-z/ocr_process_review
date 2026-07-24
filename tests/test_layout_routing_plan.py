@@ -768,7 +768,7 @@ def test_engcut_degraded_token_collects_multiple_contiguous_native_groups():
     assert disagreed is False
 
 
-def test_engcut_degraded_group_fails_without_unique_pp_word_observation():
+def test_engcut_degraded_group_without_unique_pp_word_keeps_one_native_word_observation():
     import app.engines.hanwang.micro_recblock as micro_module
 
     native_chars = [
@@ -784,12 +784,18 @@ def test_engcut_degraded_group_fails_without_unique_pp_word_observation():
     )
 
     for tokens in token_sets:
-        with pytest.raises(RuntimeError, match="without one uniquely bound PP word token"):
-            micro_module._engcut_route_line_text_and_chars(
-                native_chars,
-                ppocr_tokens=tokens,
-                foreground_word_bbox=(9, 4, 37, 30),
-            )
+        text, atoms, disagreed = micro_module._engcut_route_line_text_and_chars(
+            native_chars,
+            ppocr_tokens=tokens,
+            foreground_word_bbox=(9, 4, 37, 30),
+        )
+
+        assert text == "of"
+        assert [(atom.text, atom.bbox, atom.bbox_granularity) for atom in atoms] == [
+            ("of", (10, 4, 36, 30), "word"),
+        ]
+        assert atoms[0].source == "hanwang:EngCut:latin_route:geometry_degraded_unbound_word"
+        assert disagreed is False
 
 
 def test_engcut_degraded_group_fails_without_route_foreground_geometry():
@@ -861,9 +867,10 @@ def test_engcut_geometry_fallback_is_flagged_and_counted(monkeypatch):
         block_idx=0,
         line_idx=0,
         segment_idx=0,
-        bbox=(7, 2, 39, 32),
+        bbox=(7, 2, 44, 32),
         kind="text_latin",
         ppocr_latin_tokens=(PpOcrLatinTokenObservation("of", (8, 3, 38, 31)),),
+        content_bbox=(9, 4, 37, 30),
     )
     route = micro_module._EngCutMaskedLineRoute(
         block_idx=0,
@@ -894,11 +901,73 @@ def test_engcut_geometry_fallback_is_flagged_and_counted(monkeypatch):
     )[segment.key]
 
     assert result.text == "of"
-    assert result.bbox == (7, 2, 39, 32)
+    assert result.bbox == (9, 4, 37, 30)
+    assert result.chars[0].bbox == (9, 4, 37, 30)
     assert [atom.text for atom in result.chars] == ["of"]
     assert result.review_flags == ["latin_token_geometry_fallback"]
     assert result.source.endswith("+ppocrv6_token_text_route_foreground_geometry")
     assert stats.latin_token_geometry_fallbacks == 1
+
+    physical_line = micro_module._merge_physical_routing_line(
+        [result],
+        route_bbox=(0, 0, 80, 36),
+    )
+    observed_lines, symbol_stats = micro_module._apply_ppocr_symbol_observations(
+        physical_line,
+        (PpOcrSymbolObservation(
+            text=",",
+            bbox=(38, 22, 42, 31),
+            proposal_bbox=(37, 2, 44, 32),
+        ),),
+    )
+    assert [atom.text for atom in observed_lines[0].chars] == ["of", ","]
+    assert symbol_stats.atoms_inserted == 1
+
+
+def test_engcut_unbound_degraded_group_is_reviewable_instead_of_failing_page(monkeypatch):
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    segment = micro_module._TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(7, 2, 39, 32),
+        kind="text_latin",
+    )
+    route = micro_module._EngCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(0, 0, 80, 36),
+        segments=(segment,),
+    )
+    monkeypatch.setattr(
+        micro_module.native_bridge,
+        "run_eng20_recogline",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        micro_module,
+        "engcut_chars_from_payload",
+        lambda _payload: [
+            micro_module.EngcutChar(text="C", bbox=(10, 5, 24, 30), char_index=0),
+            micro_module.EngcutChar(text="D", bbox=(22, 4, 36, 30), char_index=1),
+        ],
+    )
+    stats = micro_module.RunStats()
+
+    result = micro_module._recognize_engcut_masked_line(
+        np.full((40, 90, 3), 255, dtype=np.uint8),
+        route,
+        stats,
+        timeout=1.0,
+    )[segment.key]
+
+    assert result.text == "CD"
+    assert [(atom.text, atom.bbox, atom.bbox_granularity) for atom in result.chars] == [
+        ("CD", (10, 4, 36, 30), "word"),
+    ]
+    assert result.review_flags == ["latin_unbound_geometry_word"]
+    assert stats.latin_unbound_geometry_words == 1
 
 
 def test_engcut_empty_native_result_keeps_explicit_pp_fallback(monkeypatch):

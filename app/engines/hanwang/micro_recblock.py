@@ -94,6 +94,8 @@ PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE = (
 PPOCR_LATIN_ITALIC_WORD_FALLBACK_FLAG = "latin_italic_word_fallback"
 INLINE_FORMULA_UNRESOLVED_FLAG = "inline_formula_ocr_unresolved"
 ENGCUT_DEGRADED_NATIVE_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_observation"
+ENGCUT_UNBOUND_WORD_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_unbound_word"
+ENGCUT_UNBOUND_WORD_FLAG = "latin_unbound_geometry_word"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 PPOCR_SYMBOL_FOREGROUND_SOURCE = "ppocrv6:symbol_foreground_observation"
@@ -243,6 +245,7 @@ class RunStats:
     latin_empty_native_fallbacks: int = 0
     latin_token_geometry_fallbacks: int = 0
     latin_italic_word_fallbacks: int = 0
+    latin_unbound_geometry_words: int = 0
     latin_token_text_disagreements: int = 0
     linecut_cjk_bbox_cleanups: int = 0
     ppocr_symbol_candidates_bound: int = 0
@@ -1942,15 +1945,13 @@ def _engcut_route_line_text_and_chars(
         if token is not None:
             token_group_indices.setdefault(token, []).append(group_index)
     degraded_tokens: set[PpOcrLatinTokenObservation] = set()
+    degraded_unbound_groups: set[int] = set()
     for group_index, (visible, token) in enumerate(zip(visible_groups, token_bindings)):
         if not _engcut_group_has_overlapping_char_bboxes(visible):
             continue
         if token is None:
-            group_text = "".join(str(char.text or "") for char in visible)
-            raise RuntimeError(
-                "EngCut group has degraded character geometry without one "
-                f"uniquely bound PP word token: text={group_text!r}"
-            )
+            degraded_unbound_groups.add(group_index)
+            continue
         degraded_tokens.add(token)
     degraded_tokens.update(
         token for token in italic_fallback_tokens if token in token_binding_counts
@@ -1963,7 +1964,37 @@ def _engcut_route_line_text_and_chars(
                 f"token={token.text!r} groups={indices}"
             )
     emitted_degraded_tokens: set[PpOcrLatinTokenObservation] = set()
-    for visible, token in zip(visible_groups, token_bindings):
+    for group_index, (visible, token) in enumerate(zip(visible_groups, token_bindings)):
+        if group_index in degraded_unbound_groups:
+            if has_output_group:
+                text_parts.append(" ")
+                results.append(
+                    _NativeAtomResult(
+                        text=" ",
+                        confidence=0.0,
+                        bbox=None,
+                        candidates=[" "],
+                        source=source,
+                        bbox_granularity="space",
+                        token_text=" ",
+                    )
+                )
+            native_text = "".join(str(char.text or "") for char in visible)
+            native_boxes = [char.bbox for char in visible if char.bbox is not None]
+            if not native_text or len(native_boxes) != len(visible):
+                raise RuntimeError("degraded unbound EngCut group has incomplete native observation")
+            text_parts.append(native_text)
+            results.append(_NativeAtomResult(
+                text=native_text,
+                confidence=0.0,
+                bbox=union_xyxy(native_boxes),
+                candidates=[native_text],
+                source=ENGCUT_UNBOUND_WORD_SOURCE,
+                bbox_granularity="word",
+                token_text=native_text,
+            ))
+            has_output_group = True
+            continue
         if token in degraded_tokens:
             assert token is not None
             if len(ppocr_tokens) != 1 or foreground_word_bbox is None:
@@ -2369,7 +2400,9 @@ def _recognize_engcut_masked_line(
             source=source,
             ppocr_tokens=segment.ppocr_latin_tokens,
             foreground_word_bbox=(
-                segment.bbox if len(segment.ppocr_latin_tokens) == 1 else None
+                (segment.content_bbox or segment.bbox)
+                if len(segment.ppocr_latin_tokens) == 1
+                else None
             ),
             italic_fallback_tokens=italic_fallback_tokens,
         )
@@ -2412,8 +2445,13 @@ def _recognize_engcut_masked_line(
             char.source == PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE
             for char in char_results
         )
+        unbound_geometry_word_count = sum(
+            char.source == ENGCUT_UNBOUND_WORD_SOURCE
+            for char in char_results
+        )
         stats.latin_token_geometry_fallbacks += token_geometry_fallback_count
         stats.latin_italic_word_fallbacks += italic_word_fallback_count
+        stats.latin_unbound_geometry_words += unbound_geometry_word_count
         if has_token_disagreement:
             stats.latin_token_text_disagreements += 1
         review_flags: list[str] = []
@@ -2421,6 +2459,8 @@ def _recognize_engcut_masked_line(
             review_flags.append(PPOCR_LATIN_TOKEN_GEOMETRY_FALLBACK_FLAG)
         if italic_word_fallback_count:
             review_flags.append(PPOCR_LATIN_ITALIC_WORD_FALLBACK_FLAG)
+        if unbound_geometry_word_count:
+            review_flags.append(ENGCUT_UNBOUND_WORD_FLAG)
         if has_token_disagreement:
             review_flags.append(PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG)
         results[segment.key] = _NativeLineResult(
@@ -2472,6 +2512,7 @@ def _recognize_engcut_masked_lines(
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             stats.latin_italic_word_fallbacks += local_stats.latin_italic_word_fallbacks
+            stats.latin_unbound_geometry_words += local_stats.latin_unbound_geometry_words
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((chunk[0], route_results))
             continue
@@ -2482,6 +2523,7 @@ def _recognize_engcut_masked_lines(
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             stats.latin_italic_word_fallbacks += local_stats.latin_italic_word_fallbacks
+            stats.latin_unbound_geometry_words += local_stats.latin_unbound_geometry_words
             stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((route, route_results))
     return results

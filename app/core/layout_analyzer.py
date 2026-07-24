@@ -33,6 +33,7 @@ _LABEL_TO_BLOCK_TYPE: dict[str, BlockType] = {
     "plain_text": BlockType.TEXT,
     "body": BlockType.TEXT,
     "body_text": BlockType.TEXT,
+    "abstract": BlockType.TEXT,
     "content": BlockType.TEXT,
     "doc_text": BlockType.TEXT,
     "text_region": BlockType.TEXT,

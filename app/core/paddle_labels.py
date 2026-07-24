@@ -16,6 +16,7 @@ PADDLE_HANWANG_TEXT_LABELS = {
     "plain_text",
     "body",
     "body_text",
+    "abstract",
     "title",
     "header",
     "footer",
