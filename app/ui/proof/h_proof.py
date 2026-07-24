@@ -129,6 +129,7 @@ TEXT_EDITOR_DEFAULT_H = 40
 TEXT_SLOT_MIN_W = 10.0
 TEXT_SLOT_GUTTER_W = 4.0
 TEXT_SLOT_CLIPPED_MIN_W = 1.0
+TEXT_VISUAL_SPACER_MIN_W = 20.0
 
 # Row proportions restored from the mature workspace: the active row carries
 # the editing focus; surrounding rows collapse both in height and opacity so
@@ -816,7 +817,7 @@ class _SlotLineEditor(QWidget):
         return bool(self._slot_x_centers)
 
     def _interaction_cells(self, text: str | None = None) -> list[QRect | None]:
-        """Return non-overlapping visual cells while preserving OCR centers."""
+        """Return atom-sized cells, leaving large source gaps as visual spacers."""
 
         value = self.toPlainText() if text is None else text
         if not value:
@@ -844,7 +845,9 @@ class _SlotLineEditor(QWidget):
             for left, right in zip(valid, valid[1:])
         )
         widget_right = max(1, self.width())
-        for position, index in enumerate(valid):
+        preferred_widths: dict[int, float] = {}
+        bounds: dict[int, list[float]] = {}
+        for index in valid:
             center = float(centers[index])
             geometry_width = (
                 geometry_widths[index]
@@ -855,16 +858,23 @@ class _SlotLineEditor(QWidget):
             geometry_width = max(geometry_min, float(geometry_width))
             visual_width = _slot_visual_width(value[index], metrics)
             preferred_width = max(geometry_width, visual_width)
-            if monotonic and position > 0:
-                previous = float(centers[valid[position - 1]])
-                left = (previous + center) / 2.0
-            else:
-                left = center - (preferred_width if monotonic else geometry_width) / 2.0
-            if monotonic and position + 1 < len(valid):
-                following = float(centers[valid[position + 1]])
-                right = (center + following) / 2.0
-            else:
-                right = center + (preferred_width if monotonic else geometry_width) / 2.0
+            preferred_widths[index] = preferred_width
+            cell_width = preferred_width if monotonic else geometry_width
+            bounds[index] = [center - cell_width / 2.0, center + cell_width / 2.0]
+        if monotonic:
+            for left_index, right_index in zip(valid, valid[1:]):
+                left_right = bounds[left_index][1]
+                right_left = bounds[right_index][0]
+                gap = right_left - left_right
+                if gap >= TEXT_VISUAL_SPACER_MIN_W:
+                    continue
+                boundary = (
+                    float(centers[left_index]) + float(centers[right_index])
+                ) / 2.0
+                bounds[left_index][1] = boundary
+                bounds[right_index][0] = boundary
+        for index in valid:
+            left, right = bounds[index]
             left_px = max(0, min(widget_right - 1, int(round(left))))
             right_px = max(left_px + 1, min(widget_right, int(round(right))))
             cells[index] = QRect(
@@ -920,6 +930,8 @@ class _SlotLineEditor(QWidget):
             return -1
         margin = max(24.0, TEXT_SLOT_MIN_W * 2.0)
         if first_left is not None and last_right is not None:
+            if first_left <= x <= last_right:
+                return -1
             if x < first_left - margin or x > last_right + margin:
                 return -1
         return best_idx

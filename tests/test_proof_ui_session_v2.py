@@ -445,6 +445,28 @@ def test_hproof_interaction_cells_cover_wide_glyph_without_moving_atom_centers(
     editor.close()
 
 
+def test_hproof_large_atom_gap_is_a_non_text_visual_spacer(qapp: QApplication) -> None:
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    editor = _SlotLineEditor()
+    editor.resize(500, 40)
+    editor.setPlainText("一(1)")
+    editor.set_slot_geometry(
+        [30.0, 350.0, 380.0, 410.0],
+        [24.0, 14.0, 14.0, 14.0],
+    )
+
+    cells = editor._interaction_cells()
+
+    assert cells[0] is not None and cells[1] is not None
+    assert cells[0].right() < 100
+    assert cells[1].left() > 300
+    assert editor._slot_index_for_x(200.0) == -1
+    assert editor._slot_index_for_x(200.0, nearest=True) == -1
+    assert editor.toPlainText() == "一(1)"
+    editor.close()
+
+
 def test_hproof_shrinks_overflowing_glyph_to_atom_without_clipping(
     qapp: QApplication,
 ) -> None:
