@@ -92,6 +92,7 @@ PPOCR_LATIN_ITALIC_WORD_FALLBACK_SOURCE = (
     "ppocrv6:latin_token_text_route_foreground_geometry:italic_postcheck"
 )
 PPOCR_LATIN_ITALIC_WORD_FALLBACK_FLAG = "latin_italic_word_fallback"
+INLINE_FORMULA_UNRESOLVED_FLAG = "inline_formula_ocr_unresolved"
 ENGCUT_DEGRADED_NATIVE_SOURCE = "hanwang:EngCut:latin_route:geometry_degraded_observation"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
@@ -953,11 +954,17 @@ def _assemble_layout_route_line(
 
     clusters = _cluster_lines_by_shape(all_text_lines)
     if not clusters:
-        return []
+        if not any(segment.kind == "formula" and segment.text for segment in segments):
+            return []
+        clusters = [[]]
 
     assembled: list[_NativeLineResult] = []
     for cluster in clusters:
-        cluster_bbox = union_xyxy([line.bbox for line in cluster])
+        cluster_bbox = (
+            union_xyxy([line.bbox for line in cluster])
+            if cluster
+            else route.bbox
+        )
         components: list[
             tuple[
                 tuple[int, int, int, int],
@@ -996,7 +1003,7 @@ def _assemble_layout_route_line(
                     confidence=0.0,
                     bbox=content_bbox,
                     candidates=[formula_text],
-                    source="paddle_inline_formula",
+                    source=_inline_formula_atom_source(segment.text_source),
                     bbox_granularity="word",
                     token_text=formula_text,
                 )
@@ -1405,6 +1412,44 @@ def _fallback_line(
             if synthesize_chars
             else []
         ),
+    )
+
+
+def _inline_formula_atom_source(text_source: str) -> str:
+    source = str(text_source or "unknown").strip() or "unknown"
+    return f"paddle_inline_formula:{source}"
+
+
+def _standalone_inline_formula_line(segment: RoutingSegment) -> _NativeLineResult:
+    bbox = segment.content_bbox or segment.bbox
+    text = segment.text
+    source = _inline_formula_atom_source(segment.text_source)
+    if not text:
+        return _NativeLineResult(
+            text="",
+            bbox=bbox,
+            confidence=0.0,
+            chars=[],
+            source=source,
+            bbox_source="layout_inline_formula_observation",
+            review_flags=[INLINE_FORMULA_UNRESOLVED_FLAG],
+        )
+    return _NativeLineResult(
+        text=text,
+        bbox=bbox,
+        confidence=0.0,
+        chars=[_NativeAtomResult(
+            text=text,
+            confidence=0.0,
+            bbox=bbox,
+            candidates=[text],
+            source=source,
+            bbox_granularity="word",
+            token_text=text,
+        )],
+        source=source,
+        bbox_source="layout_inline_formula_observation",
+        review_flags=[ROUTE_INLINE_FORMULA_FLAG],
     )
 
 
@@ -2666,6 +2711,15 @@ def run_micro_recblock(
         image_bgr,
         linecut_masked_line_routes,
     )
+    integrated_formula_uids = {
+        segment.structural_block_uid
+        for block_idx in text_indices
+        for route in native_routes_by_block_index.get(block_idx, ())
+        for segment in route.segments
+        if segment.kind == "formula"
+        and segment.text
+        and segment.structural_block_uid
+    }
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
@@ -2675,6 +2729,30 @@ def run_micro_recblock(
         block_bbox_source = "layout_block_bbox"
         ppvl_text = _block_text(block)
         synthesize_chars = not (is_formula_label(label) or is_table_label(label))
+        formula_segment = next(
+            (
+                segment
+                for route in native_routes_by_block_index.get(idx, ())
+                for segment in route.segments
+                if segment.kind == "formula"
+                and segment.structural_block_uid == input_rows[idx].block_uid
+            ),
+            None,
+        )
+        if formula_segment is not None:
+            if input_rows[idx].block_uid in integrated_formula_uids:
+                lines: list[_NativeLineResult] = []
+            else:
+                lines = [_standalone_inline_formula_line(formula_segment)]
+        else:
+            lines = [
+                _fallback_line(
+                    ppvl_text,
+                    bbox,
+                    source="ppvl",
+                    synthesize_chars=synthesize_chars,
+                )
+            ]
         rows[idx] = _NativeRegionResult(
             block_idx=idx,
             block_uid=input_rows[idx].block_uid,
@@ -2685,7 +2763,7 @@ def run_micro_recblock(
             source="ppvl",
             text=ppvl_text,
             ppvl_text=ppvl_text,
-            lines=[_fallback_line(ppvl_text, bbox, source="ppvl", synthesize_chars=synthesize_chars)],
+            lines=lines,
             raw_block=_raw_block_with_bbox_audit(
                 block,
                 width,

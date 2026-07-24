@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Iterable
 
+from app.adapters.paddle.inline_formula_observations import (
+    PaddleInlineFormulaDetectorObservation,
+    inline_formula_detector_observations,
+)
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,
@@ -13,7 +17,6 @@ from app.core.paddle_line_routing import (
     is_formula_style_position_block,
     is_table_label,
     route_authority_label,
-    route_subblocks_for_block,
     vertical_overlap_ratio,
 )
 from app.core.paddle_response import parsing_records_from_item, result_items
@@ -258,7 +261,15 @@ class PaddleArtifactIndex:
         self.page_height = page_height
         self.parents: list[PaddleParentArtifact] = []
         self.formula_geometry: list[PaddleGeometryArtifact] = []
-        self._build(_artifact_layout_records(artifact))
+        payload = _artifact_payload(artifact)
+        self._build(_layout_records_from_payload(payload))
+        self._collect_detector_formula_geometry(
+            inline_formula_detector_observations(
+                payload,
+                page_width=page_width,
+                page_height=page_height,
+            )
+        )
 
     @classmethod
     def from_artifact(
@@ -282,34 +293,28 @@ class PaddleArtifactIndex:
                 raw=dict(record),
             )
             self.parents.append(parent)
-            self._collect_formula_geometry(parent, record)
 
-    def _collect_formula_geometry(self, parent: PaddleParentArtifact, record: dict[str, Any]) -> None:
-        subblocks = [
-            subblock
-            for subblock in route_subblocks_for_block(record, self.page_width, self.page_height)
-            if is_formula_label(subblock["label"])
-        ]
-        spans = parent.formula_spans
-        ordered = _reading_order([
-            {"bbox": subblock["bbox"], "subblock": subblock}
-            for subblock in subblocks
-        ])
-        count_matches = len(spans) == len(ordered)
-        for local_index, item in enumerate(ordered):
-            subblock = item["subblock"]
-            text = str(subblock.get("text") or "")
-            span_index = local_index if local_index < len(spans) else -1
-            if not text and count_matches and span_index >= 0:
-                text = spans[span_index]
+    def _collect_detector_formula_geometry(
+        self,
+        observations: tuple[PaddleInlineFormulaDetectorObservation, ...],
+    ) -> None:
+        parent_counts: dict[int, int] = {}
+        for observation in observations:
+            parent_index = observation.parent_raw_index
+            span_index = parent_counts.get(parent_index, 0) if parent_index is not None else -1
+            if parent_index is not None:
+                parent_counts[parent_index] = span_index + 1
             self.formula_geometry.append(
                 PaddleGeometryArtifact(
                     kind="formula",
-                    label=str(subblock["label"]),
-                    bbox=tuple(subblock["bbox"]),
-                    parent_index=parent.index,
-                    raw=dict(subblock.get("raw") or {}),
-                    text=text,
+                    label="inline_formula",
+                    bbox=observation.bbox.to_xyxy(),
+                    parent_index=parent_index if parent_index is not None else -1,
+                    raw={
+                        "raw_json_path": observation.raw_json_path,
+                        "score": observation.score,
+                    },
+                    text=observation.exact_parent_text,
                     span_index=span_index,
                 )
             )
@@ -528,13 +533,17 @@ class PaddleArtifactIndex:
         )
 
 
-def _artifact_layout_records(artifact: PaddleArtifact) -> tuple[dict[str, Any], ...]:
+def _artifact_payload(artifact: PaddleArtifact) -> dict[str, Any]:
     try:
         payload = json.loads(artifact.payload_json)
     except json.JSONDecodeError as exc:
         raise ValueError("Paddle artifact payload is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("Paddle layout artifact payload must be an object")
+    return payload
+
+
+def _layout_records_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     records: list[dict[str, Any]] = []
     for item in result_items(payload, "layoutParsingResults"):
         records.extend(dict(record) for record in parsing_records_from_item(item))

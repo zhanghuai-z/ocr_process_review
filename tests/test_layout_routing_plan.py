@@ -274,6 +274,8 @@ def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
                 bbox=(70, 30, 110, 60),
                 content_bbox=(70, 10, 110, 82),
                 text="$ A $",
+                structural_block_uid="formula-1",
+                text_source="paddlevl:inline_formula_parent_span",
             ),
         ),
     )
@@ -283,8 +285,14 @@ def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
 
     assert record["segments"][0]["bbox"] == [70, 30, 110, 60]
     assert record["segments"][0]["content_bbox"] == [70, 10, 110, 82]
+    assert record["segments"][0]["structural_block_uid"] == "formula-1"
+    assert record["segments"][0]["text_source"] == (
+        "paddlevl:inline_formula_parent_span"
+    )
     assert restored.bbox == (70, 30, 110, 60)
     assert restored.content_bbox == (70, 10, 110, 82)
+    assert restored.structural_block_uid == "formula-1"
+    assert restored.text_source == "paddlevl:inline_formula_parent_span"
 
 
 def test_latin_token_observations_round_trip_only_on_latin_routes():
@@ -940,7 +948,13 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
         bbox=(0, 0, 160, 30),
         segments=(
             RoutingSegment(kind="text_other", bbox=(0, 0, 60, 30)),
-            RoutingSegment(kind="formula", label="inline_formula", bbox=(60, 0, 100, 30), text="$ A $"),
+            RoutingSegment(
+                kind="formula",
+                label="inline_formula",
+                bbox=(60, 0, 100, 30),
+                text="$ A $",
+                text_source="paddlevl:inline_formula_parent_span",
+            ),
             RoutingSegment(kind="text_latin", bbox=(100, 0, 160, 30)),
         ),
     )
@@ -978,6 +992,39 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
     assert len(lines) == 1
     assert lines[0].text == "甲$ A $abc"
     assert [char.text for char in lines[0].chars] == ["甲", "$ A $", "a", "b", "c"]
+    assert lines[0].chars[1].source == (
+        "paddle_inline_formula:paddlevl:inline_formula_parent_span"
+    )
+
+
+def test_hanwang_materializes_formula_only_routing_line_without_text_clusters():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 30),
+        segments=(RoutingSegment(
+            kind="formula",
+            label="inline_formula",
+            bbox=(30, 0, 70, 30),
+            content_bbox=(30, 0, 70, 30),
+            text="$x$",
+            structural_block_uid="formula-1",
+            text_source="paddlevl:inline_formula_crop_ocr",
+        ),),
+    )
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines={},
+        stats=micro_module.RunStats(),
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "$x$"
+    assert lines[0].chars[0].bbox == (30, 0, 70, 30)
 
 
 def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line():

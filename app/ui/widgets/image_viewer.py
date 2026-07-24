@@ -650,7 +650,7 @@ class ImageViewer(QGraphicsView):
             if atom.bbox.w <= 0 or atom.bbox.h <= 0:
                 continue
             bb = atom.bbox
-            is_formula_carrier = atom.source == "paddle_inline_formula"
+            is_formula_carrier = atom.source.startswith("paddle_inline_formula")
             color = _FORMULA_ATOM_BOX_COLOR if is_formula_carrier else _ATOM_BOX_COLOR
             label = "[formula-token]" if is_formula_carrier else "[atom]"
             item = BBoxItem(

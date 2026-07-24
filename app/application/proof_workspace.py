@@ -526,7 +526,7 @@ def _render_kind(*, region_kind: str, atom_source: str = "") -> str:
         return "formula"
     if normalized in _TABLE_REGION_KINDS:
         return "table"
-    if atom_source == "paddle_inline_formula":
+    if atom_source.startswith("paddle_inline_formula"):
         return "formula"
     return "text"
 

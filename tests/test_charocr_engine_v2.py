@@ -257,6 +257,167 @@ def test_preserved_table_keeps_html_as_one_line_without_synthetic_atoms() -> Non
     assert regions[0].lines[0].atoms == ()
 
 
+def test_standalone_inline_formula_uses_one_word_atom_with_explicit_source() -> None:
+    formula_bbox = (20, 10, 70, 45)
+    regions, _stats = run_micro_recblock(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        (
+            CharOcrInputRow(
+                block_uid="row-inline-formula",
+                label="inline_formula",
+                bbox=formula_bbox,
+                content="",
+                ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                authorship=BlockSource.AUTO_LAYOUT,
+                order=0,
+            ),
+        ),
+        routing_plan=PageRoutingPlan(
+            page_uid="page-1",
+            routing_run_uid="routing-run-formula",
+            layout_fingerprint="layout-fingerprint-formula",
+            prepass_run_id="prepass-run-formula",
+            blocks=(BlockRoutingPlan(
+                block_uid="row-inline-formula",
+                plan=RoutingPlan(
+                    lines=(RoutingLine(
+                        index=-1,
+                        bbox=formula_bbox,
+                        segments=(RoutingSegment(
+                            kind="formula",
+                            label="inline_formula",
+                            bbox=formula_bbox,
+                            content_bbox=formula_bbox,
+                            text="$x$",
+                            structural_block_uid="row-inline-formula",
+                            text_source="paddlevl:inline_formula_crop_ocr",
+                        ),),
+                    ),),
+                    text_slices=(),
+                    has_layout_routes=True,
+                ),
+            ),),
+        ),
+    )
+
+    line = regions[0].lines[0]
+    assert line.text == "$x$"
+    assert line.bbox == formula_bbox
+    assert len(line.atoms) == 1
+    assert line.atoms[0].text == "$x$"
+    assert line.atoms[0].bbox == formula_bbox
+    assert line.atoms[0].granularity == "word"
+    assert line.atoms[0].source == (
+        "paddle_inline_formula:paddlevl:inline_formula_crop_ocr"
+    )
+
+
+def test_unresolved_standalone_inline_formula_retains_editable_empty_line() -> None:
+    import app.engines.hanwang.micro_recblock as module
+
+    segment = RoutingSegment(
+        kind="formula",
+        label="inline_formula",
+        bbox=(20, 10, 70, 45),
+        content_bbox=(20, 10, 70, 45),
+        structural_block_uid="row-inline-formula",
+        text_source="paddlevl:inline_formula_unresolved",
+    )
+
+    line = module._standalone_inline_formula_line(segment)
+
+    assert line.text == ""
+    assert line.bbox == (20, 10, 70, 45)
+    assert line.chars == []
+    assert line.review_flags == ["inline_formula_ocr_unresolved"]
+
+
+def test_embedded_inline_formula_suppresses_duplicate_structural_line(monkeypatch) -> None:
+    import app.engines.hanwang.micro_recblock as module
+
+    formula_bbox = (50, 5, 75, 30)
+    text_route = RoutingLine(
+        index=0,
+        bbox=(5, 5, 110, 30),
+        segments=(
+            RoutingSegment(kind="text_other", bbox=(5, 5, 110, 30)),
+            RoutingSegment(
+                kind="formula",
+                label="inline_formula",
+                bbox=formula_bbox,
+                content_bbox=formula_bbox,
+                text="$x$",
+                structural_block_uid="row-inline-formula",
+                text_source="paddlevl:inline_formula_parent_span",
+            ),
+        ),
+    )
+    formula_route = RoutingLine(
+        index=-1,
+        bbox=formula_bbox,
+        segments=(text_route.segments[1],),
+    )
+    plan = PageRoutingPlan(
+        page_uid="page-1",
+        routing_run_uid="routing-run-embedded-formula",
+        layout_fingerprint="layout-fingerprint-embedded-formula",
+        prepass_run_id="prepass-run-embedded-formula",
+        blocks=(
+            BlockRoutingPlan(
+                block_uid="row-text",
+                plan=RoutingPlan(
+                    lines=(text_route,),
+                    text_slices=(),
+                    has_layout_routes=True,
+                ),
+            ),
+            BlockRoutingPlan(
+                block_uid="row-inline-formula",
+                plan=RoutingPlan(
+                    lines=(formula_route,),
+                    text_slices=(),
+                    has_layout_routes=True,
+                ),
+            ),
+        ),
+    )
+    rows = (
+        CharOcrInputRow(
+            block_uid="row-text",
+            label="text",
+            bbox=(5, 5, 110, 30),
+            content="",
+            ocr_policy=OcrPolicy.TEXT_OCR,
+            authorship=BlockSource.AUTO_LAYOUT,
+            order=0,
+        ),
+        CharOcrInputRow(
+            block_uid="row-inline-formula",
+            label="inline_formula",
+            bbox=formula_bbox,
+            content="",
+            ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            authorship=BlockSource.AUTO_LAYOUT,
+            order=1,
+        ),
+    )
+    monkeypatch.setattr(
+        module.native_bridge,
+        "run_linecut_segimg",
+        lambda *_args, **_kwargs: {"lines": []},
+    )
+
+    regions, _stats = run_micro_recblock(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        rows,
+        routing_plan=plan,
+    )
+
+    assert regions[0].lines[0].text == "$x$"
+    assert regions[0].lines[0].atoms[0].bbox == formula_bbox
+    assert regions[1].lines == ()
+
+
 def test_native_text_only_candidate_defaults_to_zero_confidence() -> None:
     import app.engines.hanwang.micro_recblock as module
 

@@ -199,6 +199,26 @@ def test_inline_formula_parent_text_requires_an_exact_per_parent_count() -> None
     assert [item.exact_parent_text for item in observations] == ["$x$", "$y$"]
 
 
+def test_exact_superscript_marker_is_not_promoted_to_formula_layout() -> None:
+    response = _response()
+    pruned = response["result"]["layoutParsingResults"][0]["prunedResult"]
+    pruned["parsing_res_list"][0]["block_content"] = "正文 $^{②}$"
+    pruned["layout_det_res"] = {
+        "boxes": [{
+            "label": "inline_formula",
+            "coordinate": [70, 30, 78, 42],
+        }]
+    }
+
+    observations = inline_formula_detector_observations(
+        response,
+        page_width=200,
+        page_height=300,
+    )
+
+    assert observations == ()
+
+
 def test_error_response_does_not_partially_persist_vendor_fact(tmp_path: Path):
     session = ProjectSession(ProjectRecord("project-error"))
     page = _page(session, tmp_path / "page.bin", uid="page-1", page_number=1)

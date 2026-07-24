@@ -22,7 +22,6 @@ from app.models.layout_origin import BlockOrigin
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.paddle_artifact import PaddleArtifact
 from app.models.project_session import PageRecord
-from app.services.inline_formula_layout_service import InlineFormulaLayoutService
 from app.services.layout_overlay_service import LayoutOverlayService
 from app.ui.recognize.layout_panel import LayoutPanel
 from app.ui.recognize.ocr_panel import OcrPanel
@@ -68,16 +67,19 @@ def _artifact() -> PaddleArtifact:
                                 "block_content": "before $x$ after",
                                 "_route_subblocks": [
                                     {
-                                        "block_label": "inline_formula",
-                                        "block_bbox": [40, 10, 65, 35],
-                                    },
-                                    {
                                         "block_label": "figure",
                                         "block_bbox": [75, 10, 110, 40],
                                     },
                                 ],
                             }
-                        ]
+                        ],
+                        "layout_det_res": {
+                            "boxes": [{
+                                "label": "inline_formula",
+                                "coordinate": [40, 10, 65, 35],
+                                "score": 0.9,
+                            }]
+                        },
                     }
                 }
             ]
@@ -333,32 +335,6 @@ def test_ocr_panel_consumes_ocr_workspace_without_legacy_entrypoints(tmp_path: P
     assert not hasattr(panel, "set_snapshot")
 
 
-def test_inline_formula_service_returns_snapshot_edits_from_artifact_only() -> None:
-    artifact = _artifact()
-    snapshot = _snapshot(artifact)
-    service = InlineFormulaLayoutService()
-
-    regions = service.iter_regions(artifact, page_width=160, page_height=100)
-    results = service.apply_snapshot_edits(
-        snapshot,
-        artifact,
-        page_width=160,
-        page_height=100,
-    )
-
-    assert [(region.label, region.bbox) for region in regions] == [
-        ("inline_formula", BBox.from_xyxy(40, 10, 65, 35))
-    ]
-    assert len(results) == 1
-    assert results[0].snapshot.revision == 2
-    created = results[0].snapshot.blocks[-1]
-    assert created.block_type is BlockType.EQUATION
-    assert created.origin.raw_artifact_uid == artifact.uid
-    assert created.ocr_policy is OcrPolicy.PRESERVE_AS_FORMULA
-    assert snapshot.revision == 1
-    assert len(snapshot.blocks) == 1
-
-
 def test_snapshot_attributes_overlay_and_artifact_index_use_new_boundaries() -> None:
     artifact = _artifact()
     snapshot = _snapshot(artifact)
@@ -392,5 +368,3 @@ def test_new_contracts_reject_legacy_layout_values() -> None:
     _qt_app()
     with pytest.raises(TypeError):
         LayoutPanel().set_workspace(object())
-    with pytest.raises(TypeError):
-        InlineFormulaLayoutService().iter_regions(object(), page_width=160, page_height=100)

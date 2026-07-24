@@ -8,6 +8,7 @@ from typing import Any
 
 from app.adapters.paddle.layout_importer import map_paddle_label_to_block_type
 from app.core.paddle_labels import normalize_paddle_label
+from app.core.text_classification import is_formula_marker_token
 from app.models.enums import BlockType
 from app.models.geometry import BBox
 
@@ -170,7 +171,14 @@ def inline_formula_detector_observations(
                 bound[observation_index],
                 exact_parent_text=span,
             )
-    return tuple(bound)
+    return tuple(
+        observation
+        for observation in bound
+        if not (
+            observation.exact_parent_text
+            and is_formula_marker_token(observation.exact_parent_text)
+        )
+    )
 
 
 def _item_scale(

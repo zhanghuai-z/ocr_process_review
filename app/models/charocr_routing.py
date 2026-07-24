@@ -108,6 +108,8 @@ class RoutingSegment:
     bbox: XYXY
     label: str = ""
     text: str = ""
+    structural_block_uid: str = ""
+    text_source: str = ""
     content_bbox: XYXY | None = None
     ppocr_latin_tokens: tuple[PpOcrLatinTokenObservation, ...] = ()
 
@@ -342,6 +344,8 @@ def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
         label=str(segment.get("label") or ""),
         bbox=xyxy(segment.get("bbox")),
         text=str(segment.get("text") or ""),
+        structural_block_uid=str(segment.get("structural_block_uid") or ""),
+        text_source=str(segment.get("text_source") or ""),
         content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
         ppocr_latin_tokens=tuple(
             PpOcrLatinTokenObservation(
@@ -367,6 +371,12 @@ def routing_line_to_record(
                 "label": segment.label,
                 "bbox": list(segment.bbox),
                 "text": segment.text,
+                **(
+                    {"structural_block_uid": segment.structural_block_uid}
+                    if segment.structural_block_uid
+                    else {}
+                ),
+                **({"text_source": segment.text_source} if segment.text_source else {}),
                 **({"content_bbox": list(segment.content_bbox)} if segment.content_bbox else {}),
                 **(
                     {

@@ -5,7 +5,13 @@ from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.ocr_routing_observation import RoutingObservationBundle
 
 
-def routing_observation_bundle(snapshot, prepass, *, block_vl_observations=()):
+def routing_observation_bundle(
+    snapshot,
+    prepass,
+    *,
+    block_vl_observations=(),
+    inline_formula_observations=(),
+):
     return RoutingObservationBundle(
         run_uid="routingrun-test",
         snapshot=snapshot,
@@ -13,4 +19,5 @@ def routing_observation_bundle(snapshot, prepass, *, block_vl_observations=()):
         image_hash="image-hash-test",
         layout_fingerprint=layout_snapshot_fingerprint(snapshot),
         block_vl_observations=tuple(block_vl_observations),
+        inline_formula_observations=tuple(inline_formula_observations),
     )

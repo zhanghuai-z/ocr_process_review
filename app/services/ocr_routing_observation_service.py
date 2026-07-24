@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 import numpy as np
 
 from app.core.layout_scope import layout_snapshot_fingerprint, page_image_hash
+from app.adapters.paddle.inline_formula_observations import (
+    PaddleInlineFormulaDetectorObservation,
+    inline_formula_detector_observations,
+)
 from app.core.paddle_layout_schema import normalize_paddle_layout_record
 from app.core.paddle_response import parsing_records_from_item, result_items
 from app.core.paddle_v16_client import PaddleV16LayoutClient, build_paddle_v16_optional_payload
@@ -18,8 +23,11 @@ from app.models.ocr_routing_observation import (
     BlockVlObservation,
     BlockVlObservationStatus,
     BlockVlTextRegion,
+    InlineFormulaTextObservation,
+    InlineFormulaTextObservationStatus,
     RoutingObservationBundle,
 )
+from app.services.formula_crop_ocr_service import recognize_formula_bboxes_with_retry
 
 
 TEXT_EXCLUDED_TYPES = frozenset({
@@ -28,6 +36,9 @@ TEXT_EXCLUDED_TYPES = frozenset({
     BlockType.FIGURE,
     BlockType.UNKNOWN,
 })
+INLINE_FORMULA_PARENT_SOURCE = "paddlevl:inline_formula_parent_span"
+INLINE_FORMULA_CROP_SOURCE = "paddlevl:inline_formula_crop_ocr"
+INLINE_FORMULA_UNRESOLVED_SOURCE = "paddlevl:inline_formula_unresolved"
 
 
 class BlockVlObservationRefreshError(RuntimeError):
@@ -54,6 +65,11 @@ def acquire_routing_observation_bundle(
     layout_fingerprint = layout_snapshot_fingerprint(snapshot)
     run_uid = ensure_entity_uid("", "ocrrun")
     original_records = _artifact_layout_records(artifact)
+    detector_observations = _artifact_inline_formula_observations(
+        artifact,
+        page_width=page.width,
+        page_height=page.height,
+    )
     observations: list[BlockVlObservation] = []
     for block in snapshot.blocks:
         if not _requires_text_observation(block):
@@ -78,6 +94,15 @@ def acquire_routing_observation_bundle(
             client=vl_client,
             batch_id=f"{run_uid}-{block.uid}",
         ))
+    formula_observations = _inline_formula_text_observations(
+        page=page,
+        snapshot=snapshot,
+        artifact=artifact,
+        image_bgr=image_bgr,
+        client=vl_client,
+        run_uid=run_uid,
+        detector_observations=detector_observations,
+    )
     return RoutingObservationBundle(
         run_uid=run_uid,
         snapshot=snapshot,
@@ -85,7 +110,126 @@ def acquire_routing_observation_bundle(
         image_hash=image_hash,
         layout_fingerprint=layout_fingerprint,
         block_vl_observations=tuple(observations),
+        inline_formula_observations=formula_observations,
     )
+
+
+def _inline_formula_text_observations(
+    *,
+    page: PageRecord,
+    snapshot: LayoutSnapshot,
+    artifact: PaddleArtifact,
+    image_bgr: np.ndarray,
+    client: PaddleV16LayoutClient,
+    run_uid: str,
+    detector_observations: tuple[PaddleInlineFormulaDetectorObservation, ...],
+) -> tuple[InlineFormulaTextObservation, ...]:
+    blocks = [
+        block
+        for block in snapshot.blocks
+        if block.block_type is BlockType.EQUATION
+        and str(block.source_label or "").strip().lower() == "inline_formula"
+    ]
+    if not blocks:
+        return ()
+    matched: dict[str, PaddleInlineFormulaDetectorObservation] = {}
+    for block in blocks:
+        by_path = [
+            item
+            for item in detector_observations
+            if block.origin.raw_json_path
+            and item.raw_json_path == block.origin.raw_json_path
+        ]
+        candidates = by_path or [
+            item for item in detector_observations if item.bbox == block.bbox
+        ]
+        if len(candidates) == 1:
+            matched[block.uid] = candidates[0]
+
+    result_by_uid: dict[str, InlineFormulaTextObservation] = {}
+    unresolved_blocks: list[LayoutBlockSnapshot] = []
+    for block in blocks:
+        detector = matched.get(block.uid)
+        if detector is not None and detector.exact_parent_text:
+            result_by_uid[block.uid] = InlineFormulaTextObservation(
+                page_uid=page.uid,
+                block_uid=block.uid,
+                bbox=block.bbox.to_xyxy(),
+                status=InlineFormulaTextObservationStatus.OBSERVED,
+                text=detector.exact_parent_text,
+                source=INLINE_FORMULA_PARENT_SOURCE,
+                source_artifact_uid=artifact.uid,
+                raw_response_ref=detector.raw_json_path,
+            )
+        else:
+            unresolved_blocks.append(block)
+
+    outcome = None
+    if unresolved_blocks:
+        outcome = recognize_formula_bboxes_with_retry(
+            image_bgr,
+            [block.bbox.to_xyxy() for block in unresolved_blocks],
+            client=client,
+            batch_id_prefix=f"{run_uid}-inline-formula",
+        )
+    for index, block in enumerate(unresolved_blocks):
+        crop_text = _canonical_inline_formula_text(
+            outcome.texts_by_index.get(index, "") if outcome is not None else ""
+        )
+        if crop_text:
+            result_by_uid[block.uid] = InlineFormulaTextObservation(
+                page_uid=page.uid,
+                block_uid=block.uid,
+                bbox=block.bbox.to_xyxy(),
+                status=InlineFormulaTextObservationStatus.OBSERVED,
+                text=crop_text,
+                source=INLINE_FORMULA_CROP_SOURCE,
+                source_artifact_uid=artifact.uid,
+                raw_response_ref=f"formula-crop:{index}",
+                attempts=outcome.attempts,
+            )
+        else:
+            result_by_uid[block.uid] = InlineFormulaTextObservation(
+                page_uid=page.uid,
+                block_uid=block.uid,
+                bbox=block.bbox.to_xyxy(),
+                status=InlineFormulaTextObservationStatus.UNRESOLVED,
+                text="",
+                source=INLINE_FORMULA_UNRESOLVED_SOURCE,
+                source_artifact_uid=artifact.uid,
+                raw_response_ref=f"formula-crop:{index}",
+                attempts=outcome.attempts if outcome is not None else 0,
+                error=outcome.error if outcome is not None else "formula crop was not attempted",
+            )
+    return tuple(result_by_uid[block.uid] for block in blocks)
+
+
+def _artifact_inline_formula_observations(
+    artifact: PaddleArtifact,
+    *,
+    page_width: int,
+    page_height: int,
+) -> tuple[PaddleInlineFormulaDetectorObservation, ...]:
+    payload = json.loads(artifact.payload_json)
+    if not isinstance(payload, dict):
+        raise ValueError("Paddle layout artifact must contain an object response")
+    return inline_formula_detector_observations(
+        payload,
+        page_width=page_width,
+        page_height=page_height,
+    )
+
+
+def _canonical_inline_formula_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    pairs = (("$$", "$$"), ("$", "$"), (r"\(", r"\)"), (r"\[", r"\]"))
+    for left, right in pairs:
+        if value.startswith(left) and value.endswith(right) and len(value) >= len(left) + len(right):
+            value = value[len(left):len(value) - len(right)].strip()
+            break
+    return f"${value}$" if value else ""
 
 
 def _requires_text_observation(block: LayoutBlockSnapshot) -> bool:

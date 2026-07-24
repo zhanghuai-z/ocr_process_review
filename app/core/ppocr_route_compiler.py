@@ -56,6 +56,8 @@ from app.models.enums import BlockType
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.ocr_routing_observation import (
     BlockAlignmentStatus,
+    InlineFormulaTextObservation,
+    InlineFormulaTextObservationStatus,
     LineCutOwnershipDirective,
     RoutingObservationBundle,
 )
@@ -107,6 +109,13 @@ def compile_page_routing_plan(
         ownership.line_geometry_contexts(),
         page_image_bgr,
     )
+    formula_observations = {
+        item.block_uid: item for item in observations.inline_formula_observations
+    }
+    formula_owner_lines = _formula_owner_lines(
+        observations.inline_formula_observations,
+        physical_rows.rows,
+    )
     alignments = align_block_observations(
         observations.block_vl_observations,
         physical_rows,
@@ -132,6 +141,16 @@ def compile_page_routing_plan(
     )
     issues: list[RouteValidationIssue] = []
     diagnostics: list[RouteDiagnostic] = []
+    diagnostics.extend(
+        RouteDiagnostic(
+            code="inline_formula_ocr_unresolved",
+            message=item.error or "inline formula crop OCR returned no text",
+            line_index=-1,
+            bbox=item.bbox,
+        )
+        for item in observations.inline_formula_observations
+        if item.status is InlineFormulaTextObservationStatus.UNRESOLVED
+    )
     for alignment in alignments:
         target = _text_block_by_uid(ownership, alignment.block_uid)
         target_bbox = target.bbox if target is not None else (0, 0, 0, 0)
@@ -208,6 +227,9 @@ def compile_page_routing_plan(
             structural_masks,
             page_decorations,
             page_image_bgr=page_image_bgr,
+            line_index=prepass_line.index,
+            formula_observations=formula_observations,
+            formula_owner_lines=formula_owner_lines,
             linecut_owned_bboxes=tuple(
                 directive.bbox
                 for directive in directives_by_line.get(prepass_line.index, ())
@@ -283,6 +305,40 @@ def compile_page_routing_plan(
             ),
         ))
 
+    block_by_uid = {block.uid: block for block in snapshot.blocks}
+    for observation in observations.inline_formula_observations:
+        block = block_by_uid.get(observation.block_uid)
+        if block is None:
+            issues.append(RouteValidationIssue(
+                code="missing_inline_formula_layout_block",
+                message="inline formula observation has no adopted layout block",
+                line_index=-1,
+                bbox=observation.bbox,
+            ))
+            continue
+        segment = RoutingSegment(
+            kind="formula",
+            label=block.source_label,
+            bbox=observation.bbox,
+            text=observation.text,
+            structural_block_uid=block.uid,
+            text_source=observation.source,
+            content_bbox=observation.bbox,
+        )
+        block_routes.append(BlockRoutingPlan(
+            block_uid=block.uid,
+            plan=RoutingPlan(
+                lines=(RoutingLine(
+                    index=-1,
+                    bbox=observation.bbox,
+                    segments=(segment,),
+                    source="layout:inline_formula_observation",
+                ),),
+                text_slices=(),
+                has_layout_routes=True,
+            ),
+        ))
+
     plan = PageRoutingPlan(
         page_uid=snapshot.page_uid,
         routing_run_uid=observations.run_uid,
@@ -326,6 +382,9 @@ def _segments_for_line(
     page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
+    line_index: int,
+    formula_observations: dict[str, InlineFormulaTextObservation],
+    formula_owner_lines: dict[str, int],
     linecut_owned_bboxes: tuple[XYXY, ...] = (),
 ) -> tuple[list[RoutingSegment], tuple, tuple, tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
@@ -364,15 +423,23 @@ def _segments_for_line(
     # Structural regions are exact two-dimensional masks.  They deliberately
     # do not split the physical PP row into left/right crops: the native input
     # layer subtracts these rectangles from one full-line canvas.
-    structure_segments = [
-        RoutingSegment(
+    structure_segments: list[RoutingSegment] = []
+    for block, mask, content_bbox in structural_masks:
+        formula_observation = formula_observations.get(block.uid)
+        owns_formula_text = formula_owner_lines.get(block.uid) == line_index
+        structure_segments.append(RoutingSegment(
             kind="formula" if block.block_type == BlockType.EQUATION else "skip",
             label=block.source_label,
             bbox=mask,
+            text=(
+                formula_observation.text
+                if formula_observation is not None and owns_formula_text
+                else ""
+            ),
+            structural_block_uid=block.uid,
+            text_source=formula_observation.source if formula_observation is not None else "",
             content_bbox=content_bbox if block.block_type == BlockType.EQUATION else None,
-        )
-        for block, mask, content_bbox in structural_masks
-    ]
+        ))
     decoration_segments = [
         RoutingSegment(kind="decoration", label=decoration.kind, bbox=decoration.bbox)
         for decoration in decorations
@@ -383,6 +450,36 @@ def _segments_for_line(
         tuple(symbol_observations),
         tuple(diagnostics),
     )
+
+
+def _formula_owner_lines(
+    observations: tuple[InlineFormulaTextObservation, ...],
+    rows: tuple[ResolvedPhysicalLine, ...],
+) -> dict[str, int]:
+    owners: dict[str, int] = {}
+    for observation in observations:
+        candidates: list[tuple[float, int, float, int]] = []
+        for row in rows:
+            overlap = _intersect_bbox(observation.bbox, row.bbox)
+            if overlap is None:
+                continue
+            overlap_height = overlap[3] - overlap[1]
+            formula_height = observation.bbox[3] - observation.bbox[1]
+            overlap_area = (overlap[2] - overlap[0]) * overlap_height
+            center_distance = abs(
+                (observation.bbox[1] + observation.bbox[3])
+                - (row.bbox[1] + row.bbox[3])
+            )
+            candidates.append((
+                overlap_height / max(1, formula_height),
+                overlap_area,
+                -float(center_distance),
+                -row.representative_index,
+            ))
+        if candidates:
+            best = max(candidates)
+            owners[observation.block_uid] = -best[3]
+    return owners
 
 
 def _vl_marker_observations_for_line(

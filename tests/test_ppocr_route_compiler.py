@@ -14,16 +14,22 @@ from app.models.charocr_routing import (
 )
 from app.core.ppocr_route_compiler import compile_page_routing_plan as _compile_page_routing_plan
 from app.models import BBox, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
+from app.models.ocr_routing_observation import (
+    InlineFormulaTextObservation,
+    InlineFormulaTextObservationStatus,
+)
 from tests.charocr_routing_observation_fixture import routing_observation_bundle
 
 
 def compile_page_routing_plan(snapshot, prepass, **kwargs):
     block_vl_observations = kwargs.pop("block_vl_observations", ())
+    inline_formula_observations = kwargs.pop("inline_formula_observations", ())
     return _compile_page_routing_plan(
         routing_observation_bundle(
             snapshot,
             prepass,
             block_vl_observations=block_vl_observations,
+            inline_formula_observations=inline_formula_observations,
         ),
         **kwargs,
     )
@@ -92,6 +98,90 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
         ("formula", (200, 0, 220, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
+
+
+def test_inline_formula_observation_is_bound_to_one_physical_line_and_its_block() -> None:
+    snapshot = _snapshot(
+        _block(
+            "text-1",
+            BlockType.TEXT,
+            (0, 0, 180, 80),
+            policy=OcrPolicy.TEXT_OCR,
+            order=0,
+        ),
+        _block(
+            "formula-1",
+            BlockType.EQUATION,
+            (120, 15, 150, 45),
+            policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            order=1,
+            label="inline_formula",
+        ),
+    )
+    observation = InlineFormulaTextObservation(
+        page_uid="page-1",
+        block_uid="formula-1",
+        bbox=(120, 15, 150, 45),
+        status=InlineFormulaTextObservationStatus.OBSERVED,
+        text="$x$",
+        source="paddlevl:inline_formula_crop_ocr",
+    )
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(
+            PpOcrV6LineHint(index=0, text="甲乙", bbox=(0, 0, 160, 30), words=()),
+            PpOcrV6LineHint(index=1, text="丙丁", bbox=(0, 30, 160, 60), words=()),
+        ),
+        page_width=180,
+        page_height=80,
+        inline_formula_observations=(observation,),
+    )
+
+    text_routes = plan.for_block("text-1").lines
+    formula_segments = [
+        next(segment for segment in route.segments if segment.kind == "formula")
+        for route in text_routes
+    ]
+    assert [segment.text for segment in formula_segments] == ["$x$", ""]
+    assert all(segment.structural_block_uid == "formula-1" for segment in formula_segments)
+    assert formula_segments[0].text_source == "paddlevl:inline_formula_crop_ocr"
+    standalone = plan.for_block("formula-1").lines[0].segments[0]
+    assert standalone.text == "$x$"
+    assert standalone.content_bbox == (120, 15, 150, 45)
+
+
+def test_unresolved_inline_formula_is_nonblocking_and_retains_standalone_geometry() -> None:
+    snapshot = _snapshot(_block(
+        "formula-1",
+        BlockType.EQUATION,
+        (20, 10, 60, 40),
+        policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        order=0,
+        label="inline_formula",
+    ))
+    observation = InlineFormulaTextObservation(
+        page_uid="page-1",
+        block_uid="formula-1",
+        bbox=(20, 10, 60, 40),
+        status=InlineFormulaTextObservationStatus.UNRESOLVED,
+        text="",
+        source="paddlevl:inline_formula_unresolved",
+        error="service unavailable",
+    )
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(),
+        page_width=100,
+        page_height=60,
+        inline_formula_observations=(observation,),
+    )
+
+    assert plan.is_dispatchable is True
+    assert plan.for_block("formula-1").lines[0].bbox == (20, 10, 60, 40)
+    assert plan.for_block("formula-1").lines[0].segments[0].text == ""
+    assert [(item.code, item.message) for item in plan.diagnostics] == [
+        ("inline_formula_ocr_unresolved", "service unavailable")
+    ]
 
 
 def test_compiler_does_not_align_ordinary_vl_and_pp_text_streams():

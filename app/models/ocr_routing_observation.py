@@ -30,6 +30,11 @@ class BlockAlignmentStatus(str, Enum):
     AMBIGUOUS = "ambiguous"
 
 
+class InlineFormulaTextObservationStatus(str, Enum):
+    OBSERVED = "observed"
+    UNRESOLVED = "unresolved"
+
+
 @dataclass(frozen=True)
 class BlockVlTextRegion:
     index: int
@@ -92,6 +97,32 @@ class BlockObservationAlignment:
 
 
 @dataclass(frozen=True)
+class InlineFormulaTextObservation:
+    page_uid: str
+    block_uid: str
+    bbox: XYXY
+    status: InlineFormulaTextObservationStatus
+    text: str
+    source: str
+    source_artifact_uid: str = ""
+    raw_response_ref: str = ""
+    attempts: int = 0
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.page_uid or not self.block_uid:
+            raise ValueError("inline formula observation requires page_uid and block_uid")
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("inline formula observation requires non-empty geometry")
+        if not self.source:
+            raise ValueError("inline formula observation requires an explicit source")
+        if self.status is InlineFormulaTextObservationStatus.OBSERVED and not self.text:
+            raise ValueError("observed inline formula requires text")
+        if self.status is InlineFormulaTextObservationStatus.UNRESOLVED and self.text:
+            raise ValueError("unresolved inline formula cannot contain text")
+
+
+@dataclass(frozen=True)
 class RoutingObservationBundle(Generic[TPrepass]):
     run_uid: str
     snapshot: LayoutSnapshot
@@ -99,9 +130,15 @@ class RoutingObservationBundle(Generic[TPrepass]):
     image_hash: str
     layout_fingerprint: str
     block_vl_observations: tuple[BlockVlObservation, ...]
+    inline_formula_observations: tuple[InlineFormulaTextObservation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "block_vl_observations", tuple(self.block_vl_observations))
+        object.__setattr__(
+            self,
+            "inline_formula_observations",
+            tuple(self.inline_formula_observations),
+        )
         if not self.run_uid or not self.image_hash or not self.layout_fingerprint:
             raise ValueError("routing observation bundle requires run and scope identity")
         if any(item.page_uid != self.snapshot.page_uid for item in self.block_vl_observations):
@@ -109,10 +146,24 @@ class RoutingObservationBundle(Generic[TPrepass]):
         block_uids = [item.block_uid for item in self.block_vl_observations]
         if len(set(block_uids)) != len(block_uids):
             raise ValueError("routing observation bundle contains duplicate block observations")
+        formula_uids = [item.block_uid for item in self.inline_formula_observations]
+        if len(set(formula_uids)) != len(formula_uids):
+            raise ValueError("routing observation bundle contains duplicate formula observations")
+        if any(item.page_uid != self.snapshot.page_uid for item in self.inline_formula_observations):
+            raise ValueError("routing observation bundle contains a cross-page formula observation")
 
     def vl_observation_for(self, block_uid: str) -> BlockVlObservation | None:
         return next(
             (item for item in self.block_vl_observations if item.block_uid == block_uid),
+            None,
+        )
+
+    def inline_formula_observation_for(
+        self,
+        block_uid: str,
+    ) -> InlineFormulaTextObservation | None:
+        return next(
+            (item for item in self.inline_formula_observations if item.block_uid == block_uid),
             None,
         )
 
@@ -124,5 +175,7 @@ __all__ = [
     "BlockVlObservationStatus",
     "BlockVlTextRegion",
     "LineCutOwnershipDirective",
+    "InlineFormulaTextObservation",
+    "InlineFormulaTextObservationStatus",
     "RoutingObservationBundle",
 ]
