@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Audit Latin native character boxes by the foreground fragments they create.
+"""Audit Latin native character boxes by hard crop boundaries cutting ink.
 
 This offline experiment reuses the token ownership evidence captured by
-``audit_italic_token_fallback``. It measures how one owned connected component
-is divided among native EngCut character boxes. It never changes routing, OCR,
-Proof, or project state.
+``audit_italic_token_fallback``. It measures whether the vertical sides of each
+native EngCut character crop cut through an owned connected component and
+whether the crop contains secondary disconnected ink. It never changes routing,
+OCR, Proof, or project state.
 """
 from __future__ import annotations
 
@@ -31,8 +32,8 @@ from scripts.experiment_latin_token_slant_gate import (  # noqa: E402
 )
 
 
-FRAGMENT_RATIO_THRESHOLDS = (0.005, 0.01, 0.02, 0.04, 0.08)
-FRAGMENT_COUNT_THRESHOLDS = (1, 2, 3)
+FRAGMENT_CHAR_RATIO_THRESHOLDS = (0.1, 0.2, 0.4, 0.6)
+FRAGMENT_AREA_RATIO_THRESHOLDS = (0.005, 0.01, 0.02, 0.04)
 
 
 def _xyxy(value: Any) -> tuple[int, int, int, int]:
@@ -105,6 +106,75 @@ def _component_coverage(
     ], dtype=bool)
 
 
+def _vertical_cut_contacts(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> dict[str, set[tuple[int, int]]]:
+    """Return component pixels touching both sides of a crop's vertical edges."""
+    x1, y1, x2, y2 = bbox
+    points = {(int(x), int(y)) for x, y in zip(xs, ys)}
+    contacts: dict[str, set[tuple[int, int]]] = {"left": set(), "right": set()}
+    for side, inside_x, outside_x in (
+        ("left", x1, x1 - 1),
+        ("right", x2 - 1, x2),
+    ):
+        for y in range(y1, y2):
+            inside = (inside_x, y)
+            if inside not in points:
+                continue
+            for outside_y in range(y - 1, y + 2):
+                outside = (outside_x, outside_y)
+                if outside in points:
+                    contacts[side].add(inside)
+                    contacts[side].add(outside)
+    return contacts
+
+
+def _crop_fragments(
+    points: set[tuple[int, int]],
+    bbox: tuple[int, int, int, int],
+    char: str,
+) -> tuple[list[tuple[int, int]], int]:
+    """Find secondary connected ink inside one character crop."""
+    x1, y1, x2, y2 = bbox
+    if not points or x2 <= x1 or y2 <= y1:
+        return [], 0
+    mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    for x, y in points:
+        if x1 <= x < x2 and y1 <= y < y2:
+            mask[y - y1, x - x1] = 1
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    components = [
+        (index, tuple(int(value) for value in stats[index]))
+        for index in range(1, count)
+        if int(stats[index, cv2.CC_STAT_AREA]) >= 2
+    ]
+    if len(components) <= 1:
+        return [], len(components)
+    main_index, main = max(components, key=lambda item: item[1][cv2.CC_STAT_AREA])
+    main_left, main_top, main_width, main_height, _main_area = main
+    accepted_dot: int | None = None
+    if char.lower() in {"i", "j"}:
+        candidates = []
+        main_center = main_left + main_width / 2
+        for index, (left, top, width, height, area) in components:
+            if index == main_index:
+                continue
+            center = left + width / 2
+            if top + height <= main_top + max(2, round(main_height * 0.2)):
+                candidates.append((abs(center - main_center), -area, index))
+        if candidates:
+            accepted_dot = min(candidates)[2]
+    fragments: list[tuple[int, int]] = []
+    for index, _stats in components:
+        if index in {main_index, accepted_dot}:
+            continue
+        ys, xs = np.where(labels == index)
+        fragments.extend((int(x + x1), int(y + y1)) for y, x in zip(ys, xs))
+    return fragments, len(components)
+
+
 def _fragment_metrics(
     image: np.ndarray,
     token: dict[str, Any],
@@ -121,16 +191,14 @@ def _fragment_metrics(
     total = 0
     uncovered = 0
     multi = 0
-    foreign_only = 0
-    primary_overflow = 0
-    split_component_area = 0
-    split_component_count = 0
-    foreign_fragment_count = 0
+    cut_contact_pixels: set[tuple[int, int]] = set()
+    cut_component_events = 0
+    cut_sides_by_char: list[set[str]] = [set() for _box in boxes]
     reconstruction_missing = 0
     empty_char_ink = np.zeros(len(boxes), dtype=np.int64)
-    foreign_by_char = np.zeros(len(boxes), dtype=np.int64)
+    ink_points_by_char: list[set[tuple[int, int]]] = [set() for _box in boxes]
     debug: dict[str, list[list[int]]] = {
-        "foreign": [],
+        "cut": [],
         "multi": [],
         "uncovered": [],
     }
@@ -149,6 +217,10 @@ def _fragment_metrics(
         coverage = _component_coverage(xs, ys, boxes)
         hits = np.sum(coverage, axis=1)
         empty_char_ink += hits
+        for index, covered in enumerate(coverage):
+            ink_points_by_char[index].update(
+                (int(x), int(y)) for x, y in zip(xs[covered], ys[covered])
+            )
         covered_count = np.sum(coverage, axis=0)
         uncovered_mask = covered_count == 0
         multi_mask = covered_count > 1
@@ -161,37 +233,21 @@ def _fragment_metrics(
                 )
             continue
 
-        primary = int(np.argmax(hits))
-        primary_mask = coverage[primary]
-        secondary_mask = np.any(
-            np.delete(coverage, primary, axis=0), axis=0
-        ) if len(boxes) > 1 else np.zeros(area, dtype=bool)
-        foreign_mask = secondary_mask & ~primary_mask
-        foreign_pixels = int(np.sum(foreign_mask))
-        foreign_only += foreign_pixels
-        primary_overflow += int(np.sum(~primary_mask))
-
-        significant = [
-            index
-            for index, hit in enumerate(hits)
-            if int(hit) >= max(3, round(area * 0.05))
-        ]
-        if len(significant) >= 2:
-            split_component_count += 1
-            split_component_area += area
-        for index in significant:
-            if index == primary:
+        for index, box in enumerate(boxes):
+            if not hits[index]:
                 continue
-            count = int(np.sum(coverage[index] & ~primary_mask))
-            if count <= 0:
-                continue
-            foreign_fragment_count += 1
-            foreign_by_char[index] += count
+            contacts = _vertical_cut_contacts(xs, ys, box["bbox"])
+            component_cut = False
+            for side, pixels in contacts.items():
+                if not pixels:
+                    continue
+                cut_sides_by_char[index].add(side)
+                cut_contact_pixels.update(pixels)
+                component_cut = True
+            if component_cut:
+                cut_component_events += 1
 
         if include_debug_pixels:
-            debug["foreign"].extend(
-                [[int(x), int(y)] for x, y in zip(xs[foreign_mask], ys[foreign_mask])]
-            )
             debug["multi"].extend(
                 [[int(x), int(y)] for x, y in zip(xs[multi_mask], ys[multi_mask])]
             )
@@ -208,6 +264,24 @@ def _fragment_metrics(
     empty_indices = [
         index for index, ink in enumerate(empty_char_ink) if int(ink) == 0
     ]
+    cut_indices = [index for index, sides in enumerate(cut_sides_by_char) if sides]
+    cut_side_count = sum(len(sides) for sides in cut_sides_by_char)
+    fragment_pixels: set[tuple[int, int]] = set()
+    fragment_indices: list[int] = []
+    crop_component_counts: list[int] = []
+    char_ink_total = 0
+    fragment_area_total = 0
+    for index, (box, points) in enumerate(zip(boxes, ink_points_by_char)):
+        fragments, component_count = _crop_fragments(points, box["bbox"], box["text"])
+        crop_component_counts.append(component_count)
+        char_ink_total += len(points)
+        fragment_area_total += len(fragments)
+        if fragments:
+            fragment_indices.append(index)
+            fragment_pixels.update(fragments)
+    if include_debug_pixels:
+        debug["cut"] = [[x, y] for x, y in sorted(cut_contact_pixels)]
+        debug["fragment"] = [[x, y] for x, y in sorted(fragment_pixels)]
     metrics = {
         "measurable": reconstruction_missing == 0,
         "reason": "measured" if reconstruction_missing == 0 else "component_reconstruction_missing",
@@ -215,14 +289,21 @@ def _fragment_metrics(
         "char_box_count": len(boxes),
         "empty_char_box_count": len(empty_indices),
         "empty_char_box_indices": empty_indices,
-        "foreign_fragment_count": foreign_fragment_count,
-        "foreign_fragment_char_count": int(np.sum(foreign_by_char > 0)),
-        "foreign_fragment_ratio": round(foreign_only / total, 6),
-        "primary_component_overflow_ratio": round(primary_overflow / total, 6),
+        "cut_char_count": len(cut_indices),
+        "cut_char_indices": cut_indices,
+        "cut_char_ratio": round(len(cut_indices) / len(boxes), 6),
+        "cut_side_count": cut_side_count,
+        "cut_component_events": cut_component_events,
+        "cut_contact_pixel_count": len(cut_contact_pixels),
+        "cut_contact_ratio": round(len(cut_contact_pixels) / total, 6),
+        "fragment_char_count": len(fragment_indices),
+        "fragment_char_indices": fragment_indices,
+        "fragment_char_ratio": round(len(fragment_indices) / len(boxes), 6),
+        "fragment_area": fragment_area_total,
+        "fragment_area_ratio": round(fragment_area_total / max(1, char_ink_total), 6),
+        "crop_component_counts": crop_component_counts,
         "multi_covered_ratio": round(multi / total, 6),
         "uncovered_ratio": round(uncovered / total, 6),
-        "split_component_count": split_component_count,
-        "split_component_area_ratio": round(split_component_area / total, 6),
         "reconstruction_missing": reconstruction_missing,
         "char_text": "".join(box["text"] for box in boxes),
     }
@@ -280,6 +361,7 @@ def _records(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], Counter[str
                 "text": token["text"],
                 "native_text": (token.get("metrics") or {}).get("native_text"),
                 "route_bbox": token["route_bbox"],
+                "pp_bbox": token.get("pp_bbox"),
                 "line_bbox": token["line_bbox"],
                 "native_chars": token["native_chars"],
                 "owned_components": (token.get("metrics") or {}).get("owned_components") or [],
@@ -295,16 +377,16 @@ def _records(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], Counter[str
     return records, exclusions
 
 
-def _candidate(record: dict[str, Any], ratio: float, count: int) -> bool:
+def _candidate(record: dict[str, Any], ratio: float, count: float) -> bool:
     metrics = record["fragment"]
     return bool(
         metrics.get("measurable")
-        and float(metrics.get("foreign_fragment_ratio") or 0.0) >= ratio
-        and int(metrics.get("foreign_fragment_count") or 0) >= count
+        and float(metrics.get("fragment_char_ratio") or 0.0) >= ratio
+        and float(metrics.get("fragment_area_ratio") or 0.0) >= count
     )
 
 
-def _combined_candidate(record: dict[str, Any], ratio: float, count: int) -> bool:
+def _combined_candidate(record: dict[str, Any], ratio: float, count: float) -> bool:
     slant = record["slant"]
     return bool(
         _candidate(record, ratio, count)
@@ -317,24 +399,17 @@ def _combined_candidate(record: dict[str, Any], ratio: float, count: int) -> boo
 def _quality_reference_candidate(record: dict[str, Any]) -> bool:
     """Diagnostic quality conjunction; it does not choose OCR text truth."""
     metrics = record["fragment"]
-    ratio = float(metrics.get("foreign_fragment_ratio") or 0.0)
-    count = int(metrics.get("foreign_fragment_count") or 0)
-    text_disagreement = str(record.get("text") or "") != str(
-        record.get("native_text") or ""
-    )
     return bool(
         metrics.get("measurable")
-        and (
-            (ratio >= 0.02 and count >= 2)
-            or (ratio >= 0.06 and count >= 1 and text_disagreement)
-        )
+        and float(metrics.get("fragment_char_ratio") or 0.0) >= 0.2
+        and float(metrics.get("fragment_area_ratio") or 0.0) >= 0.01
     )
 
 
 def _threshold_grid(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for ratio in FRAGMENT_RATIO_THRESHOLDS:
-        for count in FRAGMENT_COUNT_THRESHOLDS:
+    for ratio in FRAGMENT_CHAR_RATIO_THRESHOLDS:
+        for count in FRAGMENT_AREA_RATIO_THRESHOLDS:
             selected = [record for record in records if _candidate(record, ratio, count)]
             combined = [
                 record
@@ -342,8 +417,8 @@ def _threshold_grid(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if _combined_candidate(record, ratio, count)
             ]
             result.append({
-                "foreign_fragment_ratio": ratio,
-                "fragment_count": count,
+                "fragment_char_ratio": ratio,
+                "fragment_area_ratio": count,
                 "selected": len(selected),
                 "known_targets": sum(
                     item["known_label"] == "target_bad_geometry" for item in selected
@@ -376,11 +451,7 @@ def _render_row(record: dict[str, Any]) -> np.ndarray:
     }
     _metrics, debug = _fragment_metrics(image, token, include_debug_pixels=True)
     x1, y1, x2, y2 = _xyxy(record["route_bbox"])
-    height, width = image.shape[:2]
-    margin_x = max(10, round((x2 - x1) * 0.08))
-    margin_y = max(8, round((y2 - y1) * 0.30))
-    cx1, cy1 = max(0, x1 - margin_x), max(0, y1 - margin_y)
-    cx2, cy2 = min(width, x2 + margin_x), min(height, y2 + margin_y)
+    cx1, cy1, cx2, cy2 = x1, y1, x2, y2
     raw = image[cy1:cy2, cx1:cx2].copy()
     boxes = raw.copy()
     heat = raw.copy()
@@ -396,8 +467,20 @@ def _render_row(record: dict[str, Any]) -> np.ndarray:
             1,
             cv2.LINE_AA,
         )
+    if record.get("pp_bbox"):
+        px1, py1, px2, py2 = _xyxy(record["pp_bbox"])
+        for panel in (boxes, heat):
+            cv2.rectangle(
+                panel,
+                (px1 - cx1, py1 - cy1),
+                (px2 - cx1 - 1, py2 - cy1 - 1),
+                (255, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
     colors = {
-        "foreign": (0, 0, 255),
+        "cut": (255, 0, 255),
+        "fragment": (0, 0, 255),
         "multi": (0, 165, 255),
         "uncovered": (255, 80, 0),
     }
@@ -427,7 +510,8 @@ def _render_row(record: dict[str, Any]) -> np.ndarray:
         f"label={record['known_label']} fallback={record['current_word_fallback']}"
     )
     values = (
-        f"foreign={metric.get('foreign_fragment_ratio')} count={metric.get('foreign_fragment_count')} "
+        f"cut_chars={metric.get('cut_char_count')}/{metric.get('char_box_count')} "
+        f"fragments={metric.get('fragment_char_count')} area={metric.get('fragment_area_ratio')} "
         f"multi={metric.get('multi_covered_ratio')} uncovered={metric.get('uncovered_ratio')}"
     )
     cv2.putText(header, label[:150], (6, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 20, 20), 1, cv2.LINE_AA)
@@ -460,15 +544,16 @@ def _write_report(
     ranked = sorted(
         records,
         key=lambda item: (
-            float(item["fragment"].get("foreign_fragment_ratio") or 0.0),
-            int(item["fragment"].get("foreign_fragment_count") or 0),
+            float(item["fragment"].get("fragment_char_ratio") or 0.0),
+            float(item["fragment"].get("fragment_area_ratio") or 0.0),
         ),
         reverse=True,
     )
     json_path = output_dir / "report.json"
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps({
-        "schema": "latin_charbox_fragment_quality.v1",
+        "schema": "latin_charbox_fragment_quality.v3",
+        "supersedes": "v1 non-primary-component metric; v2 boundary-cut presence saturated on controls",
         "record_count": len(records),
         "exclusions": dict(exclusions),
         "threshold_grid": grid,
@@ -478,24 +563,32 @@ def _write_report(
     ranked_sheet = output_dir / "highest_fragment_candidates.png"
     combined_sheet = output_dir / "right_slant_fragment_candidates.png"
     quality_sheet = output_dir / "fragment_quality_reference_candidates.png"
+    t00031_sheet = output_dir / "T00031_pp_route_native_trace.png"
     _contact_sheet(labelled, known_sheet)
     _contact_sheet(ranked, ranked_sheet)
     combined_reference = [
         record
         for record in ranked
-        if _combined_candidate(record, 0.02, 1)
+        if _combined_candidate(record, 0.2, 0.01)
     ]
     _contact_sheet(combined_reference, combined_sheet)
     quality_reference = [
         record for record in ranked if _quality_reference_candidate(record)
     ]
     _contact_sheet(quality_reference, quality_sheet)
+    t00031_records = [
+        record
+        for record in records
+        if record["source_name"] == "T00031_00.jpg"
+        and record["text"] == "goubmieibsout"
+    ]
+    _contact_sheet(t00031_records, t00031_sheet, limit=1)
 
     lines = [
         "# Latin Character-box Fragment Quality Experiment",
         "",
         "Diagnostic only. No production or project state was modified.",
-        "Red heat pixels are owned component fragments lying only in a non-primary native character box; orange pixels are covered by multiple native boxes; blue pixels are owned ink uncovered by every native box.",
+        "Red heat pixels are secondary connected fragments inside a native character crop; one plausible upper dot is exempted for i/j. Magenta pixels are same-component contacts crossing a crop's vertical side, orange pixels are covered by multiple native boxes, and blue pixels are owned ink uncovered by every native box. The crop is tight to route_bbox; a blue rectangle marks the original PP word bbox and red rectangles mark every native character bbox.",
         "",
         "## Scope",
         "",
@@ -505,14 +598,15 @@ def _write_report(
         "",
         "## Known Test3 Cohort",
         "",
-        "| label | text | native | foreign ratio | fragments | right slope | improvement | fallback |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| label | text | native | fragment chars | fragment ratio | fragment area | cut ratio | right slope | improvement | fallback |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for record in labelled:
         metric = record["fragment"]
         lines.append(
             f"| {record['known_label']} | `{record['text']}` | `{record['native_text']}` | "
-            f"{metric.get('foreign_fragment_ratio')} | {metric.get('foreign_fragment_count')} | "
+            f"{metric.get('fragment_char_count')} | {metric.get('fragment_char_ratio')} | "
+            f"{metric.get('fragment_area_ratio')} | {metric.get('cut_char_ratio')} | "
             f"{record['slant'].get('slope')} | {record['slant'].get('score_improvement')} | "
             f"{str(record['current_word_fallback']).lower()} |"
         )
@@ -520,14 +614,14 @@ def _write_report(
         "",
         "## Threshold Grid",
         "",
-        "Fragment-only columns measure box damage. Combined columns additionally require right slope >= 0.12 and projection improvement >= 0.05.",
+        "Fragment-only columns measure character crops containing secondary connected ink after exempting one plausible i/j dot. Combined columns additionally require right slope >= 0.12 and projection improvement >= 0.05. Boundary-cut presence remains reported but is not a selector because it saturates on controls.",
         "",
-        "| foreign ratio | fragments | fragment-only | targets | controls | combined | combined targets | combined controls | combined fallback |",
+        "| fragment char ratio | fragment area ratio | fragment-only | targets | controls | combined | combined targets | combined controls | combined fallback |",
         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ))
     for row in grid:
         lines.append(
-            f"| {row['foreign_fragment_ratio']} | {row['fragment_count']} | "
+            f"| {row['fragment_char_ratio']} | {row['fragment_area_ratio']} | "
             f"{row['selected']} | {row['known_targets']} | {row['known_controls']} | "
             f"{row['combined_selected']} | {row['combined_known_targets']} | "
             f"{row['combined_known_controls']} | {row['combined_already_fallback']} |"
@@ -536,7 +630,7 @@ def _write_report(
         "",
         "## Quality Reference Conjunction",
         "",
-        "For comparison only: select at least two foreign fragments with ratio >= 0.02, or one fragment with ratio >= 0.06 plus PP/native text disagreement. Text disagreement is corroborating evidence of damaged boxes; it does not decide which OCR text is authoritative.",
+        "For comparison only: select tokens where at least 20% of character crops contain secondary fragments and fragment pixels occupy at least 1% of character-crop ink. OCR text disagreement is reported separately and does not decide which OCR text is authoritative.",
         "",
         f"- selected: {len(quality_reference)}",
         f"- known targets: {sum(item['known_label'] == 'target_bad_geometry' for item in quality_reference)}",
@@ -550,6 +644,7 @@ def _write_report(
         f"- Highest fragment candidates: `{_windows_path(ranked_sheet)}`",
         f"- Right-slope + fragment candidates: `{_windows_path(combined_sheet)}`",
         f"- Fragment quality reference candidates: `{_windows_path(quality_sheet)}`",
+        f"- T00031 PP/route/native trace: `{_windows_path(t00031_sheet)}`",
     ))
     (output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

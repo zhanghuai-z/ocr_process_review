@@ -91,14 +91,15 @@ python -m pytest -q
 - 已从回显图确认：前景组件切分比例能覆盖上述目标斜体碎框，但也会命中正常数字和部分正常拉丁词。因此三个扩大策略都只是对比样本，当前证据不足以选择生产阈值；旧斜率分桶也不能单独作为斜体判据。
 - 已从代码和回放确认：`Growth:`、`Governments:` 一类问题是 PP 独立标点被拉丁 route 的矩形包络吞入，属于符号所有权冲突，不得借 word fallback 静默吸收。诊断对所有候选策略都返回 `routing_symbol_conflict`。
 - 2026-07-24 拉丁倾斜门控实验：`scripts/experiment_latin_token_slant_gate.py` 在上一轮不可变诊断 JSON 上去重，只测量至少含两个拉丁字母、无符号所有权冲突且已有唯一 owned foreground 的 token。它用剪切校正后的纵向投影集中度估计方向，并要求同时存在前景组件切分冲突。1319 个可测 token 中，右倾 `slope>=0.12`、投影改善 `>=0.05` 的对比门控选出 38 个：24 个已由当前规则退级，新增 14 个只来自 `120166/120180` 的斜体区域；4 个已知坏框全部命中，3 个已知正常对照全部保留。绝对斜率会额外误收 `23AXW003`、`very`、`WMF` 等 5 个左倾峰样本，故不能使用绝对值。该结果支持“右倾证据 + 组件切分冲突”的组合方向，但栅格斜率峰集中量化在 `0.25`，全量没有人工字体标签，尚不足以确定生产阈值或接入生产。
-- 2026-07-24 字符框碎片质量实验：`scripts/experiment_latin_charbox_fragment_quality.py` 对同一 1319 个去重拉丁 token 重建 owned component 像素，分别统计落入非主 native 字符框的外来碎片、多个框重复覆盖的墨迹和所有框漏掉的墨迹。已知目标 `Unbalanced/Finance/Incentives` 的外来碎片比例为 `0.065860/0.257037/0.083045、0.124239`，正常对照 `Review/Economic` 为 `0`；`American` 有一个 `0.055659` 的轻微碎片，证明“存在一个碎片”不能单独触发。诊断参考合取“至少两个碎片且比例 `>=0.02`，或一个比例 `>=0.06` 的碎片同时存在 PP/native 文本分歧”在全量选出 27 个，4 个目标全中、3 个对照全保留，其中 12 个已由当前规则退级。该合取只验证碎片质量信号，文本分歧仅作坏框旁证，不决定 OCR 文本真值；当前仍无生产阈值结论。
+- 2026-07-24 字符框碎片质量实验已纠正口径：最初“把完整 owned component 归给主字符框、其余框视为外来碎片”的 v1 指标并不等价于矩形裁片切断墨迹，原 27 个候选和比例结论已作废。v2 直接测量字符矩形竖边是否切穿同一连通墨迹，已知目标和 3 个正常对照的受切字符比例都接近或等于 `1.0`，说明切穿事实普遍存在、单独使用会饱和。v3 再统计每个字符裁片中主墨迹之外的小连通组件，并为 `i/j` 允许一个合理上点；该指标在 4 个已知坏框上均为 `0`，因为视觉碎片仍与主墨迹连通，也不能解释目标退化。当前脚本保留三类测量供回显核查，但没有可进入生产的碎片阈值。
+- 已从原始 PP JSON 与回放确认：`T00031_00.jpg` 的 PP word 是 `goubmieibsout`，bbox 为 `[942,1747,1263,1795]`，后处理 route 扩为 `[926,1746,1286,1809]`；扩出的右侧前景被 EngCut 识别为额外 `]`，产生 `goubmieibsout]`。相邻右引号 `”` 在 PP 中是独立 word，`[`/左引号属于周边行上下文。现有 `symbol_conflicts` 只覆盖已配对的相邻 PP symbol，未标出这个越界样例；这是诊断覆盖缺口，不是字符碎片退级证据。
 - 尚未实施：没有修改 OCR 路由、EngCut 退级、atom 文本/几何、Proof 或持久化。生产实现前仍需获得可区分目标碎框与正常字框的判据，并单独研究独立标点所有权。
 
 完整 JSON 和四联回显图位于 `D:\project\ocr_process\worktrees\coord\debug\italic_token_fallback_study_20260723`；该目录是诊断产物，不是生产依赖或权威事实。
 
 拉丁倾斜门控报告与候选/方向拒绝回显位于 `D:\project\ocr_process\worktrees\coord\debug\latin_token_slant_gate_20260724`，同样只属于诊断证据。
 
-字符框碎片质量 JSON、目标/对照热图和 27 个参考候选回显位于 `D:\project\ocr_process\worktrees\coord\debug\latin_charbox_fragment_quality_20260724`，只属于诊断证据。
+字符框碎片质量 JSON、目标/对照热图、候选回显和 `T00031` 的 PP/route/native 专项图位于 `D:\project\ocr_process\worktrees\coord\debug\latin_charbox_fragment_quality_20260724`，只属于诊断证据；报告 schema v3 明确废弃 v1/v2 的候选解释。
 
 ## 校对心智
 
